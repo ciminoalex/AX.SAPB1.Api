@@ -5,9 +5,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json;
-using SGS.Projects.Api.Services;
+using AX.SAPB1.Api.Services;
 
-namespace SGS.Projects.Api.Controllers
+namespace AX.SAPB1.Api.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]

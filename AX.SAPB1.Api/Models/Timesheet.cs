@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace SGS.Projects.Api.Models
+namespace AX.SAPB1.Api.Models
 {
     public class Timesheet
     {

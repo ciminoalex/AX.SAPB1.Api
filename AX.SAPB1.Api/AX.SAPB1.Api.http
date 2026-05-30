@@ -1,4 +1,4 @@
-### SGS Projects API - Timesheet Management
+### AX SAP B1 API - Timesheet Management
 
 ### 1. Ottieni tutti i timesheet (ODBC SAP HANA)
 GET {{baseUrl}}/api/timesheet

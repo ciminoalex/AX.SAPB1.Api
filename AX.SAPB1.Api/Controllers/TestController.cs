@@ -1,9 +1,11 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
-namespace SGS.Projects.Api.Controllers
+namespace AX.SAPB1.Api.Controllers
 {
 	[ApiController]
 	[Route("api/[controller]")]
+	[AllowAnonymous]
 	public class TestController : ControllerBase
 	{
 		/// <summary>

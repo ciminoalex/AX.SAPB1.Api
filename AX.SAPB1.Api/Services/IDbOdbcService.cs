@@ -1,6 +1,6 @@
-using SGS.Projects.Api.Models;
+using AX.SAPB1.Api.Models;
 
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public interface IDbOdbcService
     {
@@ -23,5 +23,15 @@ namespace SGS.Projects.Api.Services
 
         // Aggregations
         Task<ActivityTimeTotal?> GetActivityTimeTotAsync(string projectId, string activityId);
+
+        // ERP financial mirror (read): fatture A/R definitive (OINV) e partitario clienti (JDT1).
+        Task<IEnumerable<ErpInvoiceDto>> GetInvoicesAsync(DateTime? since);
+        Task<IEnumerable<ErpLedgerEntryDto>> GetLedgerAsync(string? customerCode, DateTime? since);
+
+        /// <summary>
+        /// Cerca una bozza (ODRF) o una fattura definitiva (OINV) già marcata con il codice interno
+        /// AX.360 indicato nell'UDF di correlazione. Usato per evitare doppioni in fase di push.
+        /// </summary>
+        Task<ExistingErpDocument?> FindDocumentByCorrelationIdAsync(string ax360InvoiceId);
     }
 }

@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Logging;
 
-namespace SGS.Projects.Api.Support
+namespace AX.SAPB1.Api.Support
 {
     public class LoggingHttpMessageHandler : DelegatingHandler
     {

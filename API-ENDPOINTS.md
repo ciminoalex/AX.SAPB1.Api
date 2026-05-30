@@ -1,4 +1,4 @@
-# SGS Projects API — Mappa endpoint e modelli
+# AX SAP B1 API — Mappa endpoint e modelli
 
 Documentazione per integrazione client (es. interfaccia web). Generata dal codice sorgente ASP.NET Core.
 
@@ -368,4 +368,39 @@ Campi con `[Required]` nel codice: `Date`, `ResId`, `CardCode`, `Project`, `Acti
 
 ---
 
-*Documento allineato al codice del repository SGS.Projects.Api. Per comportamenti esatti in produzione, verificare configurazione JWT/SAP sul server.*
+## Integrazione ERP per il portale AX.360
+
+Endpoint consumati dal connettore `SapB1ErpConnector` di AX.360. Autenticazione **machine-to-machine** via header **`X-Api-Key`** (chiavi in `Auth:ApiKeys`); in alternativa è accettato il JWT Bearer. Tutte le route sono sotto `/api`. Serializzazione JSON in **camelCase**.
+
+### Lookup (estesi)
+| Metodo | Path | Note |
+| --- | --- | --- |
+| GET | `/api/lookup/customers` | Ora include `vatNumber`, `taxCode`, `address`, `email` (da `OCRD`). |
+| GET | `/api/lookup/projects` | Ora include `cardCode`, `cardName` (cliente del progetto, da `OPMG`→`OCRD`). |
+| GET | `/api/lookup/projects/{code}/activities` | WBS del progetto. |
+| GET | `/api/lookup/resources` | Risorse. |
+
+### Fatture (mirror finanziario + push come bozza)
+| Metodo | Path | Descrizione |
+| --- | --- | --- |
+| GET | `/api/invoices?since=yyyy-MM-dd` | Fatture A/R **definitive** (`OINV`/`INV1`/`INV6`) con righe e scadenzario. Espone `ax360InvoiceId` letto dall'UDF di correlazione. |
+| POST | `/api/invoices` | Crea una **BOZZA** di fattura A/R (oggetto `Drafts`, `DocObjectCode = oInvoices`). Idempotente sull'UDF `U_AX360_InvId`. Risposta: `{ success, erpDocId, erpDocNumber, docStatus: "draft" }`. |
+
+### Partitario
+| Metodo | Path | Descrizione |
+| --- | --- | --- |
+| GET | `/api/ledger?customerCode=&since=` | Movimenti di partitario (`JDT1`/`OJDT`) con saldo progressivo. |
+
+### Campi utente (UDF) di correlazione
+Creati automaticamente all'avvio (best-effort, via `UserFieldsMD`) su `OINV` e `ODRF`:
+- `U_AX360_InvId` — codice interno AX.360 (Invoice.Id): chiave di correlazione stabile, si propaga da bozza a definitivo;
+- `U_AX360_InvNum` — numero leggibile AX.360;
+- `U_AX360_DocType` — tipo documento per il mirror (canone|manutenzione|servizio|altro).
+
+**Flusso bozza → definitivo:** AX invia la fattura → il servizio crea una bozza con gli UDF valorizzati → l'operatore conferma la bozza in SAP (diventa `OINV`, ereditando gli UDF) → al successivo `GET /api/invoices` AX riconosce la fattura via `ax360InvoiceId` e la marca come `posted`.
+
+> I nomi colonna SAP (`OINV`/`INV1`/`INV6`/`JDT1`/`OJDT`, `OCRD.AdditionalID` per il codice fiscale, `SapB1:DefaultVatGroup` per il gruppo IVA delle righe bozza) seguono lo schema standard: verificare su installazioni con localizzazioni particolari.
+
+---
+
+*Documento allineato al codice del repository AX.SAPB1.Api. Per comportamenti esatti in produzione, verificare configurazione JWT/SAP sul server.*

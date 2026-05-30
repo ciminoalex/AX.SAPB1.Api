@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36202.13 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SGS.Projects.Api", "SGS.Projects.Api.csproj", "{2896C340-60A1-B4ED-36DA-5C85493CC8CC}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AX.SAPB1.Api", "AX.SAPB1.Api.csproj", "{2896C340-60A1-B4ED-36DA-5C85493CC8CC}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

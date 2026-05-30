@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public class InMemoryCredentialStore : ICredentialStore
     {
