@@ -218,7 +218,7 @@ Nota: per evitare l’avviso di redirect HTTPS, imposta anche `ASPNETCORE_HTTPS_
 
 ### 3) Distribuzione su IIS
 1. Installa IIS e ASP.NET Core Hosting Bundle.
-2. Crea una cartella, es. `C:\inetpub\SGS.Projects.Api` e copia i file pubblicati (`dotnet publish -c Release`).
+2. Crea una cartella, es. `C:\inetpub\AX.SAPB1.Api` e copia i file pubblicati (`dotnet publish -c Release`).
 3. In IIS Manager:
    - Crea un nuovo Application Pool (No Managed Code, Integrated, 64-bit). Abilita `Start Automatically`.
    - Crea un nuovo Sito o App sotto un sito esistente, impostando la Physical Path alla cartella pubblicata.
@@ -230,25 +230,25 @@ Nota: per evitare l’avviso di redirect HTTPS, imposta anche `ASPNETCORE_HTTPS_
 
 Pubblicazione da CLI (sul server o in CI):
 ```powershell
- dotnet publish .\SGS.Projects.Api\SGS.Projects.Api.csproj -c Release -o C:\inetpub\SGS.Projects.Api\publish
+ dotnet publish .\AX.SAPB1.Api\AX.SAPB1.Api.csproj -c Release -o C:\inetpub\AX.SAPB1.Api\publish
 ```
 Punta IIS alla cartella `publish`.
 
 ### 4) Distribuzione come Servizio Windows (alternativa)
 1. Pubblica self-contained o framework-dependent:
 ```powershell
- dotnet publish .\SGS.Projects.Api\SGS.Projects.Api.csproj -c Release -o C:\Services\SGS.Projects.Api
+ dotnet publish .\AX.SAPB1.Api\AX.SAPB1.Api.csproj -c Release -o C:\Services\AX.SAPB1.Api
 ```
 2. Crea il servizio (NSSM consigliato) oppure `sc.exe` con `pwsh`/`dotnet`:
 - Con NSSM:
-  - `nssm install SGS.Projects.Api`
+  - `nssm install AX.SAPB1.Api`
   - Path: `C:\Program Files\dotnet\dotnet.exe`
-  - Arguments: `C:\Services\SGS.Projects.Api\SGS.Projects.Api.dll`
+  - Arguments: `C:\Services\AX.SAPB1.Api\AX.SAPB1.Api.dll`
   - Startup: Automatic; Imposta variabili d’ambiente nella scheda `Environment`.
 - Con `sc.exe` (solo self-contained EXE):
 ```powershell
- sc.exe create SGS.Projects.Api binPath= "C:\Services\SGS.Projects.Api\SGS.Projects.Api.exe" start= auto
- sc.exe start SGS.Projects.Api
+ sc.exe create AX.SAPB1.Api binPath= "C:\Services\AX.SAPB1.Api\AX.SAPB1.Api.exe" start= auto
+ sc.exe start AX.SAPB1.Api
 ```
 3. Configura HTTPS per il servizio (senza dev-cert) con certificato self-signed in `LocalMachine`:
 ```powershell
@@ -256,14 +256,14 @@ Punta IIS alla cartella `publish`.
 $cert = New-SelfSignedCertificate `
   -DnsName "localhost",$env:COMPUTERNAME `
   -CertStoreLocation "Cert:\LocalMachine\My" `
-  -FriendlyName "SGS.Projects.Api SelfSigned" `
+  -FriendlyName "AX.SAPB1.Api SelfSigned" `
   -NotAfter (Get-Date).AddYears(2) `
   -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256
 
 $pwd = ConvertTo-SecureString "CHANGE_ME_STRONG_PASSWORD" -AsPlainText -Force
-Export-PfxCertificate -Cert $cert -FilePath "C:\Services\SGS.Projects.Api\sgs-api-https.pfx" -Password $pwd
+Export-PfxCertificate -Cert $cert -FilePath "C:\Services\AX.SAPB1.Api\sgs-api-https.pfx" -Password $pwd
 ```
-4. In `C:\Services\SGS.Projects.Api\appsettings.json` configura Kestrel HTTPS con PFX esplicito:
+4. In `C:\Services\AX.SAPB1.Api\appsettings.json` configura Kestrel HTTPS con PFX esplicito:
 ```json
 {
   "Kestrel": {
@@ -271,7 +271,7 @@ Export-PfxCertificate -Cert $cert -FilePath "C:\Services\SGS.Projects.Api\sgs-ap
       "Https": {
         "Url": "https://+:7226",
         "Certificate": {
-          "Path": "C:\\Services\\SGS.Projects.Api\\sgs-api-https.pfx",
+          "Path": "C:\\Services\\AX.SAPB1.Api\\sgs-api-https.pfx",
           "Password": "CHANGE_ME_STRONG_PASSWORD"
         }
       }
@@ -281,14 +281,14 @@ Export-PfxCertificate -Cert $cert -FilePath "C:\Services\SGS.Projects.Api\sgs-ap
 ```
 5. (Consigliato) importa il `.cer` in `LocalMachine\Root` per evitare warning TLS sui client interni:
 ```powershell
-Export-Certificate -Cert $cert -FilePath "C:\Services\SGS.Projects.Api\sgs-api-self.cer"
-Import-Certificate -FilePath "C:\Services\SGS.Projects.Api\sgs-api-self.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
+Export-Certificate -Cert $cert -FilePath "C:\Services\AX.SAPB1.Api\sgs-api-self.cer"
+Import-Certificate -FilePath "C:\Services\AX.SAPB1.Api\sgs-api-self.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
 ```
 6. Log on account: usa un account con permessi minimi e accesso ai driver ODBC.
 7. Riavvia e verifica:
 ```powershell
-sc.exe start SGS.Projects.Api
-sc.exe queryex SGS.Projects.Api
+sc.exe start AX.SAPB1.Api
+sc.exe queryex AX.SAPB1.Api
 netstat -ano | findstr :7226
 ```
 8. Controlla i log (Event Viewer > Windows Logs > Application).
@@ -315,7 +315,7 @@ Imposta livelli di log:
 ```powershell
 [Environment]::SetEnvironmentVariable("Logging__LogLevel__Default","Information","Machine")
 [Environment]::SetEnvironmentVariable("Logging__LogLevel__Microsoft.AspNetCore","Warning","Machine")
-[Environment]::SetEnvironmentVariable("Logging__LogLevel__SGS.Projects.Api","Information","Machine")
+[Environment]::SetEnvironmentVariable("Logging__LogLevel__AX.SAPB1.Api","Information","Machine")
 ```
 
 ### 8) Health check e verifica
@@ -333,6 +333,6 @@ Imposta livelli di log:
 - Timeouts/401 dal Service Layer: il servizio gestisce il retry; controlla scadenza sessione e orologi NTP.
 
 ### 10) Aggiornamenti/Rollback
-- Mantieni versioni pubblicate in `C:\inetpub\SGS.Projects.Api\releases\<version>`.
+- Mantieni versioni pubblicate in `C:\inetpub\AX.SAPB1.Api\releases\<version>`.
 - Usa uno swap atomico del path IIS o symlink aggiornando la `Physical Path`.
 - Conserva backup dell’`appsettings.Production.json` o delle variabili d’ambiente prima degli update.

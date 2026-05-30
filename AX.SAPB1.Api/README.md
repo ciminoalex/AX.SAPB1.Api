@@ -1,4 +1,4 @@
-# SGS Projects API
+# AX SAP B1 API
 
 API per la gestione dei timesheet tramite connessione ODBC a SAP HANA e SAP Business One Service Layer.
 
@@ -11,7 +11,7 @@ Questo progetto fornisce un'API REST per:
 ## Struttura del Progetto
 
 ```
-SGS.Projects.Api/
+AX.SAPB1.Api/
 ├── Controllers/
 │   └── TimesheetController.cs          # Controller per le API dei timesheet
 ├── Models/

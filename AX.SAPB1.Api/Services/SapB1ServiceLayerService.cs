@@ -6,9 +6,9 @@ using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using SGS.Projects.Api.Models;
+using AX.SAPB1.Api.Models;
 
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public class SapB1ServiceLayerService : ISapB1ServiceLayerService
     {
@@ -678,6 +678,179 @@ namespace SGS.Projects.Api.Services
             {
                 _logger.LogError(ex, "Error getting timesheet by DocEntry {DocEntry} from SAP B1 Service Layer", docEntry);
                 throw;
+            }
+        }
+
+        public async Task<ErpInvoicePushResult> CreateInvoiceDraftAsync(ErpInvoicePushDto dto)
+        {
+            try
+            {
+                await GetSessionIdAsync();
+
+                // Documento di servizio se nessuna riga ha un ItemCode (es. canoni/servizi free-text),
+                // altrimenti documento per articoli.
+                var hasItems = dto.Lines.Any(l => !string.IsNullOrWhiteSpace(l.ErpItemCode));
+                var docTypeSap = hasItems ? "dDocument_Items" : "dDocument_Service";
+                var defaultVatGroup = _configuration["SapB1:DefaultVatGroup"];
+
+                var lines = dto.Lines
+                    .OrderBy(l => l.SortOrder)
+                    .Select(l =>
+                    {
+                        var line = new Dictionary<string, object?>
+                        {
+                            ["LineTotal"] = l.TaxableAmount,        // imponibile di riga
+                        };
+                        if (hasItems)
+                        {
+                            line["ItemCode"] = l.ErpItemCode;
+                            line["Quantity"] = l.Quantity == 0 ? 1 : l.Quantity;
+                            line["UnitPrice"] = l.UnitPrice;
+                        }
+                        else
+                        {
+                            line["ItemDescription"] = l.Description;
+                        }
+                        if (!string.IsNullOrWhiteSpace(defaultVatGroup))
+                            line["VatGroup"] = defaultVatGroup;
+                        return line;
+                    })
+                    .ToList();
+
+                // UDF di correlazione (colonne U_...): chiave interna AX, numero leggibile, tipo documento.
+                var draft = new Dictionary<string, object?>
+                {
+                    ["DocObjectCode"] = "oInvoices",
+                    ["DocType"] = docTypeSap,
+                    ["CardCode"] = dto.ErpCustomerCode,
+                    ["DocDate"] = dto.IssueDate?.ToString("yyyy-MM-dd"),
+                    ["DocDueDate"] = (dto.DueDate ?? dto.IssueDate)?.ToString("yyyy-MM-dd"),
+                    ["Comments"] = dto.Notes,
+                    [Ax360Udf.Col(Ax360Udf.InvId)] = dto.Ax360InvoiceId,
+                    [Ax360Udf.Col(Ax360Udf.InvNum)] = dto.DocNumber,
+                    ["DocumentLines"] = lines,
+                };
+
+                var json = JsonConvert.SerializeObject(draft, new JsonSerializerSettings
+                {
+                    NullValueHandling = NullValueHandling.Ignore
+                });
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                var response = await ExecuteWithRetryAsync(() => _httpClient.PostAsync("Drafts", content));
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogError("Creazione bozza fattura fallita. Status {Status}, Body {Body}", response.StatusCode, responseContent);
+                    return new ErpInvoicePushResult
+                    {
+                        Success = false,
+                        ErrorMessage = $"SAP B1 ha risposto {(int)response.StatusCode}: {responseContent}"
+                    };
+                }
+
+                var result = JsonConvert.DeserializeObject<JObject>(responseContent);
+                var docEntry = result?["DocEntry"]?.ToString();
+                var docNum = result?["DocNum"]?.ToString();
+
+                _logger.LogInformation("Bozza fattura creata: DocEntry={DocEntry}, DocNum={DocNum}, Ax360InvId={InvId}",
+                    docEntry, docNum, dto.Ax360InvoiceId);
+
+                return new ErpInvoicePushResult
+                {
+                    Success = true,
+                    ErpDocId = docEntry,
+                    ErpDocNumber = docNum,
+                    DocStatus = "draft",
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Errore nella creazione della bozza fattura in SAP B1 Service Layer");
+                return new ErpInvoicePushResult { Success = false, ErrorMessage = ex.Message };
+            }
+        }
+
+        public async Task EnsureAx360UserFieldsAsync()
+        {
+            // Tabelle dei documenti di marketing su cui replicare i campi: fattura definitiva (OINV) e bozze (ODRF).
+            // Avere lo stesso campo su entrambe permette a SAP di propagare il valore alla conferma della bozza.
+            var tables = new[] { "OINV", "ODRF" };
+            var fields = new (string Name, string Type, int Size, string Desc)[]
+            {
+                (Ax360Udf.InvId,   "db_Alpha", 50, "AX.360 invoice correlation id"),
+                (Ax360Udf.InvNum,  "db_Alpha", 50, "AX.360 invoice number"),
+                (Ax360Udf.DocType, "db_Alpha", 20, "AX.360 document type"),
+            };
+
+            try
+            {
+                await GetSessionIdAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "EnsureAx360UserFields: impossibile aprire la sessione SAP B1, skip.");
+                return;
+            }
+
+            foreach (var table in tables)
+            {
+                foreach (var f in fields)
+                {
+                    try
+                    {
+                        if (await UserFieldExistsAsync(table, f.Name))
+                        {
+                            _logger.LogDebug("UDF {Table}.U_{Field} già presente.", table, f.Name);
+                            continue;
+                        }
+
+                        var body = new Dictionary<string, object?>
+                        {
+                            ["TableName"] = table,
+                            ["Name"] = f.Name,
+                            ["Type"] = f.Type,
+                            ["Size"] = f.Size,
+                            ["Description"] = f.Desc,
+                        };
+                        var json = JsonConvert.SerializeObject(body);
+                        var content = new StringContent(json, Encoding.UTF8, "application/json");
+                        var resp = await ExecuteWithRetryAsync(() => _httpClient.PostAsync("UserFieldsMD", content));
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation("UDF {Table}.U_{Field} creato.", table, f.Name);
+                        }
+                        else
+                        {
+                            var err = await resp.Content.ReadAsStringAsync();
+                            // Già esistente o non permesso: best-effort, non bloccante.
+                            _logger.LogWarning("Creazione UDF {Table}.U_{Field} non riuscita ({Status}): {Err}", table, f.Name, resp.StatusCode, err);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Errore nel provisioning UDF {Table}.U_{Field}", table, f.Name);
+                    }
+                }
+            }
+        }
+
+        private async Task<bool> UserFieldExistsAsync(string table, string name)
+        {
+            try
+            {
+                var url = $"UserFieldsMD?$filter=TableName eq '{table}' and Name eq '{name}'&$select=FieldID,Name";
+                var resp = await ExecuteWithRetryAsync(() => _httpClient.GetAsync(url));
+                if (!resp.IsSuccessStatusCode) return false;
+                var contentStr = await resp.Content.ReadAsStringAsync();
+                var parsed = JsonConvert.DeserializeObject<JObject>(contentStr);
+                var arr = parsed?["value"] as JArray;
+                return arr != null && arr.Count > 0;
+            }
+            catch
+            {
+                return false;
             }
         }
 

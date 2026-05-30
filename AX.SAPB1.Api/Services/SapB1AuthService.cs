@@ -1,7 +1,7 @@
 using System.Text;
 using Newtonsoft.Json;
 
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public class SapB1AuthService : ISapB1AuthService
     {

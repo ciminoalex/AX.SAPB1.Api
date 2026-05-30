@@ -1,9 +1,12 @@
-using SGS.Projects.Api.Services;
-using SGS.Projects.Api.Support;
+using AX.SAPB1.Api.Authentication;
+using AX.SAPB1.Api.Services;
+using AX.SAPB1.Api.Support;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Hosting.WindowsServices;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 
@@ -28,7 +31,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo { Title = "SGS Projects API", Version = "v1" });
+    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo { Title = "AX SAP B1 API", Version = "v1" });
 
     var securityScheme = new Microsoft.OpenApi.Models.OpenApiSecurityScheme
     {
@@ -68,6 +71,9 @@ builder.Services.AddCors(options =>
 // Register custom services
 builder.Services.AddScoped<IDbOdbcService, DbOdbcService>();
 builder.Services.AddSingleton<ICredentialStore, InMemoryCredentialStore>();
+
+// Provisioning all'avvio dei campi utente AX.360 sui documenti di marketing SAP B1.
+builder.Services.AddHostedService<Ax360UserFieldsBootstrapService>();
 
 // HttpClient for SAP B1 auth probing (login validation)
 builder.Services.AddHttpClient<ISapB1AuthService, SapB1AuthService>()
@@ -143,7 +149,25 @@ builder.Services
             ValidAudience = jwtSection["Audience"],
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
         };
-    });
+    })
+    // Schema a chiave API per il portale AX.360 (machine-to-machine, header X-Api-Key).
+    .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>(
+        ApiKeyAuthenticationHandler.SchemeName, _ => { });
+
+// Policy combinata: un endpoint è accessibile con JWT Bearer valido OPPURE con una chiave API valida.
+// Impostata come FallbackPolicy così da proteggere tutti gli endpoint privi di [Authorize]
+// (gli endpoint pubblici restano marcati [AllowAnonymous], es. login/test).
+builder.Services.AddAuthorization(options =>
+{
+    var jwtOrApiKey = new AuthorizationPolicyBuilder(
+            JwtBearerDefaults.AuthenticationScheme,
+            ApiKeyAuthenticationHandler.SchemeName)
+        .RequireAuthenticatedUser()
+        .Build();
+
+    options.DefaultPolicy = jwtOrApiKey;
+    options.FallbackPolicy = jwtOrApiKey;
+});
 
 var app = builder.Build();
 
@@ -151,7 +175,7 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "SGS Projects API v1");
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "AX SAP B1 API v1");
 });
 app.MapOpenApi();
 
@@ -165,6 +189,8 @@ if (builder.Environment.IsDevelopment())
 app.UseCors("AllowAngularApp");
 
 // Authentication & Authorization middleware
+app.UseAuthentication();
+app.UseAuthorization();
 
 // Request/response timing middleware for all incoming requests
 app.Use(async (context, next) =>

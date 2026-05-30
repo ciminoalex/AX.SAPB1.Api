@@ -1,10 +1,10 @@
 using System.Data.Odbc;
-using SGS.Projects.Api.Models;
+using AX.SAPB1.Api.Models;
 using Microsoft.AspNetCore.Http;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public class DbOdbcService : IDbOdbcService
     {
@@ -616,12 +616,19 @@ namespace SGS.Projects.Api.Services
             {
                 using var connection = await CreateOpenConnectionAsync();
 
+                // Anagrafica cliente estesa (partita IVA, codice fiscale, indirizzo, email) per il portale AX.
+                // LicTradNum = P.IVA/Tax ID; AdditionalID = campo libero spesso usato per il Codice Fiscale;
+                // Address = indirizzo di fatturazione predefinito; E_Mail = email anagrafica.
                 var query = $@"
-                    SELECT 
+                    SELECT
                         ""CardCode"",
-                        ""CardName""
+                        ""CardName"",
+                        ""LicTradNum"",
+                        ""AdditionalID"",
+                        ""Address"",
+                        ""E_Mail""
                     FROM ""{_schema}"".""OCRD""
-                    WHERE ""CardType"" = 'C' 
+                    WHERE ""CardType"" = 'C'
                     ORDER BY ""CardName""";
 
                 using var command = new OdbcCommand(query, connection);
@@ -634,7 +641,11 @@ namespace SGS.Projects.Api.Services
                     customers.Add(new CustomerSummary
                     {
                         CardCode = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
-                        CardName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1)
+                        CardName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                        VatNumber = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        TaxCode = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        Address = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        Email = reader.IsDBNull(5) ? null : reader.GetString(5)
                     });
                 }
             }
@@ -692,12 +703,16 @@ namespace SGS.Projects.Api.Services
                 using var connection = new OdbcConnection(_connectionString);
                 await connection.OpenAsync();
 
+                // Includo i dati cliente del progetto (CardCode/CardName) richiesti dal portale AX (ErpProjectDto).
                 var query = $@"
                     SELECT
                         T.""AbsEntry"" AS ""Code"",
-                        T.""NAME"" AS ""Name""
+                        T.""NAME"" AS ""Name"",
+                        T.""CARDCODE"" AS ""CardCode"",
+                        C.""CardName"" AS ""CardName""
                     FROM ""{_schema}"".""OPMG"" T
-                    ORDER BY ""NAME""";
+                    LEFT JOIN ""{_schema}"".""OCRD"" C ON C.""CardCode"" = T.""CARDCODE""
+                    ORDER BY T.""NAME""";
 
                 using var command = new OdbcCommand(query, connection);
                 using var reader = await command.ExecuteReaderAsync();
@@ -706,7 +721,9 @@ namespace SGS.Projects.Api.Services
                     projects.Add(new ProjectSummary
                     {
                         Code = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString(),
-                        Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1)
+                        Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                        CardCode = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        CardName = reader.IsDBNull(3) ? null : reader.GetString(3)
                     });
                 }
             }
@@ -947,5 +964,250 @@ namespace SGS.Projects.Api.Services
                 throw;
             }
         }
+
+        // ──────────────────────────────────────────────────────────────────────
+        // ERP financial mirror (read)
+        //
+        // NOTA: i nomi colonna seguono lo schema standard SAP B1 (OINV/INV1/INV6/JDT1/OJDT).
+        // Su installazioni con localizzazioni particolari verificare i nomi rispetto alla company.
+        // ──────────────────────────────────────────────────────────────────────
+
+        public async Task<IEnumerable<ErpInvoiceDto>> GetInvoicesAsync(DateTime? since)
+        {
+            var invoices = new Dictionary<int, ErpInvoiceDto>();
+            var byDocEntry = new Dictionary<string, int>(); // ErpDocId(string) → DocEntry(int) per binding righe/rate
+
+            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+            var udfDocType = Ax360Udf.Col(Ax360Udf.DocType);
+            var sinceClause = since.HasValue ? @"WHERE T.""DocDate"" >= ?" : string.Empty;
+
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+
+                // 1) Testate fattura
+                var headerQuery = $@"
+                    SELECT
+                        T.""DocEntry"", T.""DocNum"", T.""CardCode"",
+                        T.""DocDate"", T.""DocDueDate"", T.""DocCur"",
+                        T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments"",
+                        T.""{udfInvId}"", T.""{udfDocType}""
+                    FROM ""{_schema}"".""OINV"" T
+                    {sinceClause}
+                    ORDER BY T.""DocDate"", T.""DocEntry""";
+
+                using (var command = new OdbcCommand(headerQuery, connection))
+                {
+                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var docEntry = reader.GetInt32(0);
+                        var docTotal = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
+                        var vatSum = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7);
+                        var docType = reader.IsDBNull(11) ? null : reader.GetString(11);
+                        var dto = new ErpInvoiceDto
+                        {
+                            ErpDocId = docEntry.ToString(),
+                            ErpDocNumber = reader.IsDBNull(1) ? docEntry.ToString() : reader.GetInt32(1).ToString(),
+                            ErpCustomerCode = reader.IsDBNull(2) ? null : reader.GetString(2),
+                            IssueDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                            DueDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                            Currency = reader.IsDBNull(5) ? "EUR" : reader.GetString(5),
+                            TotalAmount = docTotal,
+                            VatAmount = vatSum,
+                            TaxableAmount = docTotal - vatSum,
+                            PaidAmount = reader.IsDBNull(8) ? 0m : reader.GetDecimal(8),
+                            Notes = reader.IsDBNull(9) ? null : reader.GetString(9),
+                            Ax360InvoiceId = reader.IsDBNull(10) ? null : NullIfEmpty(reader.GetString(10)),
+                            DocType = string.IsNullOrWhiteSpace(docType) ? "altro" : docType!,
+                        };
+                        invoices[docEntry] = dto;
+                        byDocEntry[dto.ErpDocId!] = docEntry;
+                    }
+                }
+
+                if (invoices.Count == 0) return invoices.Values.ToList();
+
+                // 2) Righe fattura (INV1)
+                var lineQuery = $@"
+                    SELECT
+                        L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
+                        L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal""
+                    FROM ""{_schema}"".""INV1"" L
+                    INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = L.""DocEntry""
+                    {(since.HasValue ? @"WHERE H.""DocDate"" >= ?" : string.Empty)}
+                    ORDER BY L.""DocEntry"", L.""LineNum""";
+
+                using (var command = new OdbcCommand(lineQuery, connection))
+                {
+                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var docEntry = reader.GetInt32(0);
+                        if (!invoices.TryGetValue(docEntry, out var inv)) continue;
+                        var lineTotalNet = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
+                        var gross = reader.IsDBNull(8) ? lineTotalNet : reader.GetDecimal(8);
+                        inv.Lines.Add(new ErpInvoiceLineDto
+                        {
+                            SortOrder = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            ErpItemCode = reader.IsDBNull(2) ? null : reader.GetString(2),
+                            Description = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                            Quantity = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                            UnitPrice = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
+                            TaxableAmount = lineTotalNet,
+                            VatRate = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
+                            VatAmount = gross - lineTotalNet,
+                            LineTotal = gross,
+                        });
+                    }
+                }
+
+                // 3) Scadenzario/rate (INV6)
+                var instQuery = $@"
+                    SELECT
+                        I.""DocEntry"", I.""InstlmntID"", I.""DueDate"", I.""InsTotal"", I.""PaidToDate""
+                    FROM ""{_schema}"".""INV6"" I
+                    INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = I.""DocEntry""
+                    {(since.HasValue ? @"WHERE H.""DocDate"" >= ?" : string.Empty)}
+                    ORDER BY I.""DocEntry"", I.""InstlmntID""";
+
+                using (var command = new OdbcCommand(instQuery, connection))
+                {
+                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var docEntry = reader.GetInt32(0);
+                        if (!invoices.TryGetValue(docEntry, out var inv)) continue;
+                        inv.Installments.Add(new ErpPaymentInstallmentDto
+                        {
+                            InstallmentNumber = reader.IsDBNull(1) ? inv.Installments.Count + 1 : reader.GetInt32(1),
+                            DueDate = reader.IsDBNull(2) ? (inv.DueDate ?? default) : reader.GetDateTime(2),
+                            Amount = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
+                            PaidAmount = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                            PaidAt = null,
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving invoices from database (since={Since})", since);
+                throw;
+            }
+
+            return invoices.Values.ToList();
+        }
+
+        public async Task<IEnumerable<ErpLedgerEntryDto>> GetLedgerAsync(string? customerCode, DateTime? since)
+        {
+            var entries = new List<ErpLedgerEntryDto>();
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+
+                var conditions = new List<string> { @"J.""ShortName"" IS NOT NULL" };
+                if (!string.IsNullOrWhiteSpace(customerCode)) conditions.Add(@"J.""ShortName"" = ?");
+                if (since.HasValue) conditions.Add(@"J.""RefDate"" >= ?");
+                var whereClause = "WHERE " + string.Join(" AND ", conditions);
+
+                // JDT1 = righe di registrazione contabile; OJDT = testata (TransType per classificazione).
+                var query = $@"
+                    SELECT
+                        J.""ShortName"", J.""TransId"", J.""Ref1"", J.""RefDate"", J.""DueDate"",
+                        J.""Debit"", J.""Credit"", J.""LineMemo"", H.""TransType""
+                    FROM ""{_schema}"".""JDT1"" J
+                    INNER JOIN ""{_schema}"".""OJDT"" H ON H.""TransId"" = J.""TransId""
+                    {whereClause}
+                    ORDER BY J.""ShortName"", J.""RefDate"", J.""TransId""";
+
+                using var command = new OdbcCommand(query, connection);
+                if (!string.IsNullOrWhiteSpace(customerCode)) command.Parameters.AddWithValue("@CardCode", customerCode);
+                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+
+                var runningBalance = new Dictionary<string, decimal>();
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var shortName = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+                    var debit = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5);
+                    var credit = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
+                    runningBalance.TryGetValue(shortName, out var prev);
+                    var balance = prev + debit - credit;
+                    runningBalance[shortName] = balance;
+
+                    entries.Add(new ErpLedgerEntryDto
+                    {
+                        ErpCustomerCode = shortName,
+                        ErpDocNumber = reader.IsDBNull(2) ? (reader.IsDBNull(1) ? string.Empty : reader.GetInt32(1).ToString()) : reader.GetString(2),
+                        EntryDate = reader.IsDBNull(3) ? default : reader.GetDateTime(3),
+                        DueDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                        DocType = MapLedgerDocType(reader.IsDBNull(8) ? (int?)null : reader.GetInt32(8)),
+                        Description = reader.IsDBNull(7) ? null : reader.GetString(7),
+                        Currency = "EUR",
+                        Debit = debit,
+                        Credit = credit,
+                        Balance = balance,
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving ledger from database (customer={Customer}, since={Since})", customerCode, since);
+                throw;
+            }
+            return entries;
+        }
+
+        public async Task<ExistingErpDocument?> FindDocumentByCorrelationIdAsync(string ax360InvoiceId)
+        {
+            if (string.IsNullOrWhiteSpace(ax360InvoiceId)) return null;
+            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+
+                // Bozze (ODRF) e fatture definitive (OINV) condividono l'UDF di correlazione.
+                // Le bozze A/R sono filtrate per ObjType = '13' (oInvoices).
+                var query = $@"
+                    SELECT ""DocEntry"", ""DocNum"", 'posted' AS ""Kind""
+                    FROM ""{_schema}"".""OINV"" WHERE ""{udfInvId}"" = ?
+                    UNION ALL
+                    SELECT ""DocEntry"", ""DocNum"", 'draft' AS ""Kind""
+                    FROM ""{_schema}"".""ODRF"" WHERE ""{udfInvId}"" = ? AND ""ObjType"" = '13'";
+
+                using var command = new OdbcCommand(query, connection);
+                command.Parameters.AddWithValue("@InvId1", ax360InvoiceId);
+                command.Parameters.AddWithValue("@InvId2", ax360InvoiceId);
+                using var reader = await command.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    return new ExistingErpDocument
+                    {
+                        ErpDocId = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString(),
+                        ErpDocNumber = reader.IsDBNull(1) ? string.Empty : reader.GetInt32(1).ToString(),
+                        DocStatus = reader.IsDBNull(2) ? "draft" : reader.GetString(2),
+                    };
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking correlation id {InvId} in database", ax360InvoiceId);
+                throw;
+            }
+        }
+
+        private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+        private static string MapLedgerDocType(int? transType) => transType switch
+        {
+            13 => "fattura",        // A/R Invoice
+            14 => "nota_credito",   // A/R Credit Memo
+            24 => "pagamento",      // Incoming Payment
+            _ => "altro",
+        };
     }
 }

@@ -1,4 +1,4 @@
-namespace SGS.Projects.Api.Services
+namespace AX.SAPB1.Api.Services
 {
     public interface ICredentialStore
     {
