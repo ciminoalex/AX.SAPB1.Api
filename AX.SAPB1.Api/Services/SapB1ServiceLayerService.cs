@@ -687,30 +687,38 @@ namespace AX.SAPB1.Api.Services
             {
                 await GetSessionIdAsync();
 
-                // Documento di servizio se nessuna riga ha un ItemCode (es. canoni/servizi free-text),
-                // altrimenti documento per articoli.
-                var hasItems = dto.Lines.Any(l => !string.IsNullOrWhiteSpace(l.ErpItemCode));
-                var docTypeSap = hasItems ? "dDocument_Items" : "dDocument_Service";
+                // Le fatture sono sempre registrate come documento per articoli (dDocument_Items).
+                // Le righe prive di ErpItemCode (tipicamente Time & Materials, calcolate da ore x tariffa)
+                // usano il codice articolo configurato in SapB1:TimeAndMaterialsItemCode.
+                var tmItemCode = _configuration["SapB1:TimeAndMaterialsItemCode"];
                 var defaultVatGroup = _configuration["SapB1:DefaultVatGroup"];
+
+                if (string.IsNullOrWhiteSpace(tmItemCode) && dto.Lines.Any(l => string.IsNullOrWhiteSpace(l.ErpItemCode)))
+                {
+                    _logger.LogError("Creazione fattura impossibile: presenti righe senza ItemCode ma SapB1:TimeAndMaterialsItemCode non e configurato.");
+                    return new ErpInvoicePushResult
+                    {
+                        Success = false,
+                        ErrorMessage = "SapB1:TimeAndMaterialsItemCode non configurato: impossibile registrare righe Time & Materials senza codice articolo."
+                    };
+                }
+
+                const string docTypeSap = "dDocument_Items";
 
                 var lines = dto.Lines
                     .OrderBy(l => l.SortOrder)
                     .Select(l =>
                     {
+                        // Righe con proprio articolo: usano l'ItemCode reale; le T&M ricadono sull'articolo configurato.
+                        var itemCode = !string.IsNullOrWhiteSpace(l.ErpItemCode) ? l.ErpItemCode : tmItemCode;
                         var line = new Dictionary<string, object?>
                         {
+                            ["ItemCode"] = itemCode,
+                            ["ItemDescription"] = l.Description,    // mantiene il dettaglio attivita di riga
+                            ["Quantity"] = l.Quantity == 0 ? 1 : l.Quantity,
+                            ["UnitPrice"] = l.UnitPrice,
                             ["LineTotal"] = l.TaxableAmount,        // imponibile di riga
                         };
-                        if (hasItems)
-                        {
-                            line["ItemCode"] = l.ErpItemCode;
-                            line["Quantity"] = l.Quantity == 0 ? 1 : l.Quantity;
-                            line["UnitPrice"] = l.UnitPrice;
-                        }
-                        else
-                        {
-                            line["ItemDescription"] = l.Description;
-                        }
                         if (!string.IsNullOrWhiteSpace(defaultVatGroup))
                             line["VatGroup"] = defaultVatGroup;
                         return line;

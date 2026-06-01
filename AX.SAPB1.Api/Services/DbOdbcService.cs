@@ -800,7 +800,7 @@ namespace AX.SAPB1.Api.Services
                 {
                     activities.Add(new ActivitySummary
                     {
-                        Code = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString(),
+                        Code = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString("D2"),
                         Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
                         UoM = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
                         Price = reader.IsDBNull(3) ? 0 : reader.GetDecimal(3),
