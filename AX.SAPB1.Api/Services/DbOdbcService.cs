@@ -657,6 +657,84 @@ namespace AX.SAPB1.Api.Services
             return customers;
         }
 
+        // Query parametrica del profilo cliente esteso (ERP-neutro). Read-only.
+        // Le colonne oltre CardCode/CardName sono best-effort: LEFT JOIN così un cliente
+        // senza termini/agente/gruppo non viene escluso. Da validare sullo schema SAP del tenant.
+        private string BuildCustomerProfileQuery(bool single) => $@"
+            SELECT
+                T0.""CardCode"",
+                T0.""CardName"",
+                T0.""Phone1"",
+                T0.""E_Mail"",
+                T1.""PymntGroup"",
+                T2.""Descript"",
+                T3.""SlpName"",
+                T4.""GroupName"",
+                T0.""CreateDate"",
+                T0.""CreditLine"",
+                T0.""Balance""
+            FROM ""{_schema}"".""OCRD"" T0
+            LEFT JOIN ""{_schema}"".""OCTG"" T1 ON T1.""GroupNum"" = T0.""GroupNum""
+            LEFT JOIN ""{_schema}"".""OPYM"" T2 ON T2.""PayMethCod"" = T0.""PymCode""
+            LEFT JOIN ""{_schema}"".""OSLP"" T3 ON T3.""SlpCode"" = T0.""SlpCode""
+            LEFT JOIN ""{_schema}"".""OCRG"" T4 ON T4.""GroupCode"" = T0.""GroupCode""
+            WHERE T0.""CardType"" = 'C'" + (single ? @"
+              AND T0.""CardCode"" = ?" : @"
+            ORDER BY T0.""CardName""");
+
+        private static CustomerProfile MapCustomerProfile(System.Data.Common.DbDataReader reader) => new()
+        {
+            CardCode = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+            CardName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+            Phone = reader.IsDBNull(2) ? null : reader.GetString(2),
+            Email = reader.IsDBNull(3) ? null : reader.GetString(3),
+            PaymentTermsLabel = reader.IsDBNull(4) ? null : reader.GetString(4),
+            PaymentMethod = reader.IsDBNull(5) ? null : reader.GetString(5),
+            SalesAgent = reader.IsDBNull(6) ? null : reader.GetString(6),
+            BusinessPartnerGroup = reader.IsDBNull(7) ? null : reader.GetString(7),
+            CustomerSince = reader.IsDBNull(8) ? null : Convert.ToDateTime(reader.GetValue(8)),
+            CreditLimit = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
+            CurrentBalance = reader.IsDBNull(10) ? null : Convert.ToDecimal(reader.GetValue(10)),
+        };
+
+        public async Task<IEnumerable<CustomerProfile>> GetCustomerProfilesAsync()
+        {
+            var profiles = new List<CustomerProfile>();
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+                using var command = new OdbcCommand(BuildCustomerProfileQuery(single: false), connection);
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    profiles.Add(MapCustomerProfile(reader));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving customer profiles from database");
+                throw;
+            }
+            return profiles;
+        }
+
+        public async Task<CustomerProfile?> GetCustomerProfileAsync(string cardCode)
+        {
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+                using var command = new OdbcCommand(BuildCustomerProfileQuery(single: true), connection);
+                command.Parameters.AddWithValue("@CardCode", cardCode);
+                using var reader = await command.ExecuteReaderAsync();
+                return await reader.ReadAsync() ? MapCustomerProfile(reader) : null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving customer profile {CardCode} from database", cardCode);
+                throw;
+            }
+        }
+
         public async Task<IEnumerable<ContactSummary>> GetContactsByCustomerAsync(string cardCode)
         {
             var contacts = new List<ContactSummary>();

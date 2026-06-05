@@ -14,6 +14,10 @@ namespace AX.SAPB1.Api.Services
 
         // Lookups
         Task<IEnumerable<CustomerSummary>> GetCustomersAsync();
+
+        /// <summary>Profili anagrafici clienti estesi (ERP-neutri) per il mirror ExternalCustomerProfile del portale.</summary>
+        Task<IEnumerable<CustomerProfile>> GetCustomerProfilesAsync();
+        Task<CustomerProfile?> GetCustomerProfileAsync(string cardCode);
         Task<IEnumerable<ContactSummary>> GetContactsByCustomerAsync(string cardCode);
         Task<IEnumerable<ProjectSummary>> GetProjectsAsync();
         Task<ProjectLookupDetail?> GetProjectLookupDetailByCodeAsync(string projectCode);

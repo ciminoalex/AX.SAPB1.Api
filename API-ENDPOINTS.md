@@ -45,6 +45,8 @@ Gli endpoint marcati **Protetto** richiedono questo header. Il token è legato a
 | PUT | `/api/timesheet/{docEntry}` | Sì | Aggiorna timesheet (SAP Service Layer); `DocEntry` URL = body |
 | DELETE | `/api/timesheet/{code}` | Sì | Elimina timesheet per **codice** alfanumerico (non `DocEntry`) |
 | GET | `/api/lookup/customers` | Sì | Elenco clienti |
+| GET | `/api/customers` | Sì | Profili anagrafici estesi (bulk) per il mirror ExternalCustomerProfile del portale |
+| GET | `/api/customers/{cardCode}` | Sì | Profilo anagrafico esteso di un singolo cliente |
 | GET | `/api/lookup/customers/{cardCode}/contacts` | Sì | Referenti per cliente |
 | GET | `/api/lookup/customers/{cardCode}/projects` | Sì | Progetti per cliente |
 | GET | `/api/lookup/projects` | Sì | Elenco progetti |
