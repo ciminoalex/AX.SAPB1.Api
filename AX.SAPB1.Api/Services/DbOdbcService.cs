@@ -617,14 +617,15 @@ namespace AX.SAPB1.Api.Services
                 using var connection = await CreateOpenConnectionAsync();
 
                 // Anagrafica cliente estesa (partita IVA, codice fiscale, indirizzo, email) per il portale AX.
-                // LicTradNum = P.IVA/Tax ID; AdditionalID = campo libero spesso usato per il Codice Fiscale;
+                // LicTradNum = P.IVA/Tax ID; AddID = campo libero spesso usato per il Codice Fiscale
+                // (nello schema HANA la colonna è "AddID", non "AdditionalID");
                 // Address = indirizzo di fatturazione predefinito; E_Mail = email anagrafica.
                 var query = $@"
                     SELECT
                         ""CardCode"",
                         ""CardName"",
                         ""LicTradNum"",
-                        ""AdditionalID"",
+                        ""AddID"",
                         ""Address"",
                         ""E_Mail""
                     FROM ""{_schema}"".""OCRD""
@@ -1161,7 +1162,8 @@ namespace AX.SAPB1.Api.Services
                         if (!invoices.TryGetValue(docEntry, out var inv)) continue;
                         inv.Installments.Add(new ErpPaymentInstallmentDto
                         {
-                            InstallmentNumber = reader.IsDBNull(1) ? inv.Installments.Count + 1 : reader.GetInt32(1),
+                            // INV6.InstlmntID è SMALLINT (Int16) nello schema HANA: GetInt32 lancia InvalidCast.
+                            InstallmentNumber = reader.IsDBNull(1) ? inv.Installments.Count + 1 : Convert.ToInt32(reader.GetValue(1)),
                             DueDate = reader.IsDBNull(2) ? (inv.DueDate ?? default) : reader.GetDateTime(2),
                             Amount = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
                             PaidAmount = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
