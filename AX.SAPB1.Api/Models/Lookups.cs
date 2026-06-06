@@ -28,6 +28,7 @@ namespace AX.SAPB1.Api.Models
         public string CardName { get; set; } = string.Empty;
         public string? Phone { get; set; }
         public string? Email { get; set; }
+        public string? Website { get; set; }
         public string? Iban { get; set; }
         public string? PaymentTermsLabel { get; set; }
         public string? PaymentMethod { get; set; }

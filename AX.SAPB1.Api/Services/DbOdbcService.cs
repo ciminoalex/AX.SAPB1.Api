@@ -673,7 +673,9 @@ namespace AX.SAPB1.Api.Services
                 T4.""GroupName"",
                 T0.""CreateDate"",
                 T0.""CreditLine"",
-                T0.""Balance""
+                T0.""Balance"",
+                T0.""DflIBAN"",
+                T0.""IntrntSite""
             FROM ""{_schema}"".""OCRD"" T0
             LEFT JOIN ""{_schema}"".""OCTG"" T1 ON T1.""GroupNum"" = T0.""GroupNum""
             LEFT JOIN ""{_schema}"".""OPYM"" T2 ON T2.""PayMethCod"" = T0.""PymCode""
@@ -696,6 +698,9 @@ namespace AX.SAPB1.Api.Services
             CustomerSince = reader.IsDBNull(8) ? null : Convert.ToDateTime(reader.GetValue(8)),
             CreditLimit = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
             CurrentBalance = reader.IsDBNull(10) ? null : Convert.ToDecimal(reader.GetValue(10)),
+            // OCRD."DflIBAN" = IBAN del conto bancario di default del cliente; "IntrntSite" = sito web.
+            Iban = reader.IsDBNull(11) ? null : reader.GetString(11),
+            Website = reader.IsDBNull(12) ? null : reader.GetString(12),
         };
 
         public async Task<IEnumerable<CustomerProfile>> GetCustomerProfilesAsync()
