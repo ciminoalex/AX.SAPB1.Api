@@ -19,6 +19,14 @@ namespace AX.SAPB1.Api.Services
         /// <summary>Tipo documento per il mirror finanziario AX (canone|manutenzione|servizio|altro).</summary>
         public const string DocType = "AX360_DocType";
 
+        /// <summary>
+        /// Categoria di ricavo della singola RIGA documento (es. Licenze, Manutenzioni, Hardware…).
+        /// Esiste con lo stesso alias anche a livello articolo (OITM): la riga ha la PRECEDENZA,
+        /// così gli articoli "contenitore" (generici come ART_GEN/MAT-DIV) possono essere classificati
+        /// per singola riga in base al venduto effettivo.
+        /// </summary>
+        public const string RevCat = "AX360_RevCat";
+
         /// <summary>Nome colonna fisica (prefisso "U_") del campo utente.</summary>
         public static string Col(string name) => "U_" + name;
     }

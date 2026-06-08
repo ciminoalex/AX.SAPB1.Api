@@ -1114,12 +1114,18 @@ namespace AX.SAPB1.Api.Services
                 if (invoices.Count == 0) return invoices.Values.ToList();
 
                 // 2) Righe fattura (INV1)
+                // Categoria di ricavo risolta lato servizio: precedenza all'UDF di RIGA (INV1.U_AX360_RevCat),
+                // fallback all'UDF dell'ARTICOLO (OITM.U_AX360_RevCat); così gli articoli "contenitore"
+                // (generici) sono classificabili per singola riga. Il portale riceve solo la stringa risolta.
+                var udfRevCat = Ax360Udf.Col(Ax360Udf.RevCat);
                 var lineQuery = $@"
                     SELECT
                         L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
-                        L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal""
+                        L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal"",
+                        COALESCE(NULLIF(L.""{udfRevCat}"", ''), NULLIF(I.""{udfRevCat}"", '')) AS ""RevCat""
                     FROM ""{_schema}"".""INV1"" L
                     INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = L.""DocEntry""
+                    LEFT JOIN ""{_schema}"".""OITM"" I ON I.""ItemCode"" = L.""ItemCode""
                     {(since.HasValue ? @"WHERE H.""DocDate"" >= ?" : string.Empty)}
                     ORDER BY L.""DocEntry"", L.""LineNum""";
 
@@ -1144,6 +1150,7 @@ namespace AX.SAPB1.Api.Services
                             VatRate = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
                             VatAmount = gross - lineTotalNet,
                             LineTotal = gross,
+                            Category = reader.IsDBNull(9) ? null : NullIfEmpty(reader.GetString(9)),
                         });
                     }
                 }

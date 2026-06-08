@@ -43,6 +43,13 @@ namespace AX.SAPB1.Api.Models
         public decimal VatRate { get; set; }
         public decimal VatAmount { get; set; }
         public decimal LineTotal { get; set; }
+
+        /// <summary>
+        /// Categoria di ricavo risolta per la riga: UDF di riga (U_AX360_RevCat su INV1) se valorizzata,
+        /// altrimenti UDF dell'articolo (U_AX360_RevCat su OITM), altrimenti null (= "Generico" lato portale).
+        /// Naming ERP-neutro: il portale consuma una stringa categoria senza conoscere SAP.
+        /// </summary>
+        public string? Category { get; set; }
     }
 
     public class ErpPaymentInstallmentDto

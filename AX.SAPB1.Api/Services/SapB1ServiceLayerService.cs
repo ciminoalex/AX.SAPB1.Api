@@ -782,14 +782,25 @@ namespace AX.SAPB1.Api.Services
 
         public async Task EnsureAx360UserFieldsAsync()
         {
-            // Tabelle dei documenti di marketing su cui replicare i campi: fattura definitiva (OINV) e bozze (ODRF).
-            // Avere lo stesso campo su entrambe permette a SAP di propagare il valore alla conferma della bozza.
+            // Tabelle dei documenti di marketing su cui replicare i campi di TESTATA: fattura definitiva
+            // (OINV) e bozze (ODRF). Avere lo stesso campo su entrambe permette a SAP di propagare il
+            // valore alla conferma della bozza.
             var tables = new[] { "OINV", "ODRF" };
             var fields = new (string Name, string Type, int Size, string Desc)[]
             {
                 (Ax360Udf.InvId,   "db_Alpha", 50, "AX.360 invoice correlation id"),
                 (Ax360Udf.InvNum,  "db_Alpha", 50, "AX.360 invoice number"),
                 (Ax360Udf.DocType, "db_Alpha", 20, "AX.360 document type"),
+            };
+
+            // Campo di RIGA: la categoria di ricavo per singola riga documento. Va creato una sola volta
+            // su una tabella di righe (INV1); SAP lo propaga automaticamente a tutte le altre tabelle di
+            // riga dei documenti di marketing (DRF1 bozze incluse). Serve a classificare le righe degli
+            // articoli "contenitore" (generici) per cui la categoria a livello articolo non basta.
+            var rowTables = new[] { "INV1" };
+            var rowFields = new (string Name, string Type, int Size, string Desc)[]
+            {
+                (Ax360Udf.RevCat, "db_Alpha", 50, "AX.360 revenue category (riga)"),
             };
 
             try
@@ -839,6 +850,46 @@ namespace AX.SAPB1.Api.Services
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Errore nel provisioning UDF {Table}.U_{Field}", table, f.Name);
+                    }
+                }
+            }
+
+            foreach (var table in rowTables)
+            {
+                foreach (var f in rowFields)
+                {
+                    try
+                    {
+                        if (await UserFieldExistsAsync(table, f.Name))
+                        {
+                            _logger.LogDebug("UDF {Table}.U_{Field} già presente.", table, f.Name);
+                            continue;
+                        }
+
+                        var body = new Dictionary<string, object?>
+                        {
+                            ["TableName"] = table,
+                            ["Name"] = f.Name,
+                            ["Type"] = f.Type,
+                            ["Size"] = f.Size,
+                            ["Description"] = f.Desc,
+                        };
+                        var json = JsonConvert.SerializeObject(body);
+                        var content = new StringContent(json, Encoding.UTF8, "application/json");
+                        var resp = await ExecuteWithRetryAsync(() => _httpClient.PostAsync("UserFieldsMD", content));
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation("UDF di riga {Table}.U_{Field} creato (SAP lo propaga alle altre righe documento).", table, f.Name);
+                        }
+                        else
+                        {
+                            var err = await resp.Content.ReadAsStringAsync();
+                            _logger.LogWarning("Creazione UDF di riga {Table}.U_{Field} non riuscita ({Status}): {Err}", table, f.Name, resp.StatusCode, err);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Errore nel provisioning UDF di riga {Table}.U_{Field}", table, f.Name);
                     }
                 }
             }
