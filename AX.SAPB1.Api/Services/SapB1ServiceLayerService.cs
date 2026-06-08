@@ -799,6 +799,13 @@ namespace AX.SAPB1.Api.Services
                 {
                     (Ax360Udf.RevCat, "db_Alpha", 50, "AX.360 revenue category"),
                 }),
+                // Stesso campo a livello di RIGA documento (precedenza sulla categoria di articolo/conto):
+                // classifica per singola riga gli articoli "contenitore"/generici. Creato una sola volta su
+                // INV1; SAP lo propaga a tutte le tabelle righe dei documenti di marketing (RIN1, DRF1, …).
+                (new[] { "INV1" }, new (string, string, int, string)[]
+                {
+                    (Ax360Udf.RevCat, "db_Alpha", 50, "AX.360 revenue category (riga)"),
+                }),
             };
 
             try
