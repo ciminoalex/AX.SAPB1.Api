@@ -28,7 +28,9 @@ namespace AX.SAPB1.Api.Controllers
         }
 
         /// <summary>
-        /// Fatture A/R definitive, opzionalmente filtrate per data di emissione minima.
+        /// Fatture A/R definitive. Con <paramref name="since"/> il fetch è incrementale per data di
+        /// ULTIMA MODIFICA (OINV.UpdateDate), non per data di emissione: così gli incassi registrati
+        /// su fatture già emesse rientrano nel delta e lo stato di pagamento si propaga al portale.
         /// </summary>
         [HttpGet]
         public async Task<ActionResult<IEnumerable<ErpInvoiceDto>>> Get([FromQuery] DateTime? since)
