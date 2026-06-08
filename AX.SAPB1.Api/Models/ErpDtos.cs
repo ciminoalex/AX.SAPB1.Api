@@ -12,6 +12,14 @@ namespace AX.SAPB1.Api.Models
         public string? ErpDocId { get; set; }
         public string ErpDocNumber { get; set; } = string.Empty;
         public string DocType { get; set; } = "altro";
+
+        /// <summary>
+        /// Vero se il documento è una nota di credito A/R (ORIN). Per le note di credito tutti gli importi
+        /// (TaxableAmount, VatAmount, TotalAmount, PaidAmount e gli importi di righe/rate) sono esposti con
+        /// segno NEGATIVO, così il portale li somma come riduzione di fatturato ed esposizione.
+        /// </summary>
+        public bool IsCreditNote { get; set; }
+
         public string? ErpCustomerCode { get; set; }
 
         /// <summary>Codice interno AX.360 (Invoice.Id) letto dall'UDF, se la fattura proviene da una bozza AX.</summary>
