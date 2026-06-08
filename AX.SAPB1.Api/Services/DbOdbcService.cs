@@ -1156,13 +1156,21 @@ namespace AX.SAPB1.Api.Services
 
             if (invoices.Count == 0) return new List<ErpInvoiceDto>();
 
-            // 2) Righe
+            // 2) Righe (+ categoria di ricavo per la "Composizione dello scaduto" del portale): UDF
+            //    sull'anagrafica articolo (OITM) per le righe a articolo, sul conto contabile (OACT)
+            //    per le righe di servizio (ItemCode vuoto → si usa il conto della riga).
+            var udfRevCat = Ax360Udf.Col(Ax360Udf.RevCat); // "U_AX360_RevCat"
             var lineQuery = $@"
                 SELECT
                     L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
-                    L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal""
+                    L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal"",
+                    CASE WHEN L.""ItemCode"" IS NOT NULL AND L.""ItemCode"" <> ''
+                         THEN ITM.""{udfRevCat}""
+                         ELSE ACT.""{udfRevCat}"" END AS ""RevenueCategory""
                 FROM ""{_schema}"".""{lineTable}"" L
                 INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = L.""DocEntry""
+                LEFT JOIN ""{_schema}"".""OITM"" ITM ON ITM.""ItemCode"" = L.""ItemCode""
+                LEFT JOIN ""{_schema}"".""OACT"" ACT ON ACT.""AcctCode"" = L.""AcctCode""
                 {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
                 ORDER BY L.""DocEntry"", L.""LineNum""";
 
@@ -1187,6 +1195,9 @@ namespace AX.SAPB1.Api.Services
                         VatRate = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
                         VatAmount = sign * (gross - lineTotalNet),
                         LineTotal = sign * gross,
+                        RevenueCategory = reader.IsDBNull(9) || string.IsNullOrWhiteSpace(reader.GetString(9))
+                            ? null
+                            : reader.GetString(9).Trim(),
                     });
                 }
             }

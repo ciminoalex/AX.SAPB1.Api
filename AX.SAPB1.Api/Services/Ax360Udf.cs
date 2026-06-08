@@ -19,6 +19,13 @@ namespace AX.SAPB1.Api.Services
         /// <summary>Tipo documento per il mirror finanziario AX (canone|manutenzione|servizio|altro).</summary>
         public const string DocType = "AX360_DocType";
 
+        /// <summary>
+        /// Categoria di ricavo della riga, per la "Composizione dello scaduto" del portale. Testo libero,
+        /// mostrato verbatim lato AX.360. Vive sull'anagrafica articolo (OITM) per le righe a articolo e
+        /// sul conto contabile (OACT) per le righe di servizio; viene letta per riga di fattura.
+        /// </summary>
+        public const string RevCat = "AX360_RevCat";
+
         /// <summary>Nome colonna fisica (prefisso "U_") del campo utente.</summary>
         public static string Col(string name) => "U_" + name;
     }
