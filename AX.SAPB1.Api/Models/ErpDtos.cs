@@ -51,6 +51,13 @@ namespace AX.SAPB1.Api.Models
         public decimal VatRate { get; set; }
         public decimal VatAmount { get; set; }
         public decimal LineTotal { get; set; }
+
+        /// <summary>
+        /// Categoria di ricavo della riga (UDF SAP). Per le righe a articolo viene dal campo utente
+        /// sull'anagrafica articolo (OITM); per le righe di servizio dal campo utente sul conto
+        /// contabile (OACT). Null se non valorizzata.
+        /// </summary>
+        public string? RevenueCategory { get; set; }
     }
 
     public class ErpPaymentInstallmentDto

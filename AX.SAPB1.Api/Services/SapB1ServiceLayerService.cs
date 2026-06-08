@@ -782,14 +782,23 @@ namespace AX.SAPB1.Api.Services
 
         public async Task EnsureAx360UserFieldsAsync()
         {
-            // Tabelle dei documenti di marketing su cui replicare i campi: fattura definitiva (OINV) e bozze (ODRF).
-            // Avere lo stesso campo su entrambe permette a SAP di propagare il valore alla conferma della bozza.
-            var tables = new[] { "OINV", "ODRF" };
-            var fields = new (string Name, string Type, int Size, string Desc)[]
+            // Provisioning dei campi utente AX.360, raggruppati per tabelle bersaglio:
+            //  • OINV/ODRF: correlazione fattura↔bozza (lo stesso campo su entrambe propaga il valore
+            //    alla conferma della bozza);
+            //  • OITM/OACT: categoria di ricavo per la "Composizione dello scaduto" del portale — usata
+            //    sull'anagrafica articolo (righe a articolo) e sul conto contabile (righe di servizio).
+            var groups = new (string[] Tables, (string Name, string Type, int Size, string Desc)[] Fields)[]
             {
-                (Ax360Udf.InvId,   "db_Alpha", 50, "AX.360 invoice correlation id"),
-                (Ax360Udf.InvNum,  "db_Alpha", 50, "AX.360 invoice number"),
-                (Ax360Udf.DocType, "db_Alpha", 20, "AX.360 document type"),
+                (new[] { "OINV", "ODRF" }, new (string, string, int, string)[]
+                {
+                    (Ax360Udf.InvId,   "db_Alpha", 50, "AX.360 invoice correlation id"),
+                    (Ax360Udf.InvNum,  "db_Alpha", 50, "AX.360 invoice number"),
+                    (Ax360Udf.DocType, "db_Alpha", 20, "AX.360 document type"),
+                }),
+                (new[] { "OITM", "OACT" }, new (string, string, int, string)[]
+                {
+                    (Ax360Udf.RevCat, "db_Alpha", 50, "AX.360 revenue category"),
+                }),
             };
 
             try
@@ -802,43 +811,46 @@ namespace AX.SAPB1.Api.Services
                 return;
             }
 
-            foreach (var table in tables)
+            foreach (var (tables, fields) in groups)
             {
-                foreach (var f in fields)
+                foreach (var table in tables)
                 {
-                    try
+                    foreach (var f in fields)
                     {
-                        if (await UserFieldExistsAsync(table, f.Name))
+                        try
                         {
-                            _logger.LogDebug("UDF {Table}.U_{Field} già presente.", table, f.Name);
-                            continue;
-                        }
+                            if (await UserFieldExistsAsync(table, f.Name))
+                            {
+                                _logger.LogDebug("UDF {Table}.U_{Field} già presente.", table, f.Name);
+                                continue;
+                            }
 
-                        var body = new Dictionary<string, object?>
-                        {
-                            ["TableName"] = table,
-                            ["Name"] = f.Name,
-                            ["Type"] = f.Type,
-                            ["Size"] = f.Size,
-                            ["Description"] = f.Desc,
-                        };
-                        var json = JsonConvert.SerializeObject(body);
-                        var content = new StringContent(json, Encoding.UTF8, "application/json");
-                        var resp = await ExecuteWithRetryAsync(() => _httpClient.PostAsync("UserFieldsMD", content));
-                        if (resp.IsSuccessStatusCode)
-                        {
-                            _logger.LogInformation("UDF {Table}.U_{Field} creato.", table, f.Name);
+                            var body = new Dictionary<string, object?>
+                            {
+                                ["TableName"] = table,
+                                ["Name"] = f.Name,
+                                ["Type"] = f.Type,
+                                ["Size"] = f.Size,
+                                ["Description"] = f.Desc,
+                            };
+                            var json = JsonConvert.SerializeObject(body);
+                            var content = new StringContent(json, Encoding.UTF8, "application/json");
+                            var resp = await ExecuteWithRetryAsync(() => _httpClient.PostAsync("UserFieldsMD", content));
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                _logger.LogInformation("UDF {Table}.U_{Field} creato.", table, f.Name);
+                            }
+                            else
+                            {
+                                var err = await resp.Content.ReadAsStringAsync();
+                                // Già esistente o non permesso: best-effort, non bloccante.
+                                _logger.LogWarning("Creazione UDF {Table}.U_{Field} non riuscita ({Status}): {Err}", table, f.Name, resp.StatusCode, err);
+                            }
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            var err = await resp.Content.ReadAsStringAsync();
-                            // Già esistente o non permesso: best-effort, non bloccante.
-                            _logger.LogWarning("Creazione UDF {Table}.U_{Field} non riuscita ({Status}): {Err}", table, f.Name, resp.StatusCode, err);
+                            _logger.LogWarning(ex, "Errore nel provisioning UDF {Table}.U_{Field}", table, f.Name);
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Errore nel provisioning UDF {Table}.U_{Field}", table, f.Name);
                     }
                 }
             }
