@@ -1058,167 +1058,198 @@ namespace AX.SAPB1.Api.Services
 
         public async Task<IEnumerable<ErpInvoiceDto>> GetInvoicesAsync(DateTime? since)
         {
-            var invoices = new Dictionary<int, ErpInvoiceDto>();
-            var byDocEntry = new Dictionary<string, int>(); // ErpDocId(string) → DocEntry(int) per binding righe/rate
-
-            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
-            var udfDocType = Ax360Udf.Col(Ax360Udf.DocType);
-            // Watermark incrementale: filtra per data di ULTIMA MODIFICA (UpdateDate), non per data di
-            // emissione (DocDate). Quando in SAP B1 si applica un incasso, l'invoice viene aggiornata
-            // (cambia PaidToDate) e UpdateDate avanza: filtrando su UpdateDate il sync incrementale
-            // rivede le fatture saldate e propaga lo stato di pagamento. Filtrando su DocDate, invece,
-            // un incasso su una fattura già emessa non rientrerebbe MAI nel fetch incrementale e lo stato
-            // resterebbe congelato a "aperto/scaduto" per sempre.
-            var sinceClause = since.HasValue ? @"WHERE T.""UpdateDate"" >= ?" : string.Empty;
-
+            var result = new List<ErpInvoiceDto>();
             try
             {
                 using var connection = await CreateOpenConnectionAsync();
 
-                // 1) Testate fattura
-                var headerQuery = $@"
-                    SELECT
-                        T.""DocEntry"", T.""DocNum"", T.""CardCode"",
-                        T.""DocDate"", T.""DocDueDate"", T.""DocCur"",
-                        T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments"",
-                        T.""{udfInvId}"", T.""{udfDocType}""
-                    FROM ""{_schema}"".""OINV"" T
-                    {sinceClause}
-                    ORDER BY T.""DocDate"", T.""DocEntry""";
+                // Fatture A/R definitive (OINV / INV1 / INV6, ObjType 13).
+                result.AddRange(await ReadInvoiceDocumentsAsync(
+                    connection, "OINV", "INV1", "INV6", invType: 13, isCreditNote: false, since));
 
-                using (var command = new OdbcCommand(headerQuery, connection))
-                {
-                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
-                    using var reader = await command.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var docEntry = reader.GetInt32(0);
-                        var docTotal = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
-                        var vatSum = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7);
-                        var docType = reader.IsDBNull(11) ? null : reader.GetString(11);
-                        var dto = new ErpInvoiceDto
-                        {
-                            ErpDocId = docEntry.ToString(),
-                            ErpDocNumber = reader.IsDBNull(1) ? docEntry.ToString() : reader.GetInt32(1).ToString(),
-                            ErpCustomerCode = reader.IsDBNull(2) ? null : reader.GetString(2),
-                            IssueDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                            DueDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-                            Currency = reader.IsDBNull(5) ? "EUR" : reader.GetString(5),
-                            TotalAmount = docTotal,
-                            VatAmount = vatSum,
-                            TaxableAmount = docTotal - vatSum,
-                            PaidAmount = reader.IsDBNull(8) ? 0m : reader.GetDecimal(8),
-                            Notes = reader.IsDBNull(9) ? null : reader.GetString(9),
-                            Ax360InvoiceId = reader.IsDBNull(10) ? null : NullIfEmpty(reader.GetString(10)),
-                            DocType = string.IsNullOrWhiteSpace(docType) ? "altro" : docType!,
-                        };
-                        invoices[docEntry] = dto;
-                        byDocEntry[dto.ErpDocId!] = docEntry;
-                    }
-                }
-
-                if (invoices.Count == 0) return invoices.Values.ToList();
-
-                // 2) Righe fattura (INV1)
-                var lineQuery = $@"
-                    SELECT
-                        L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
-                        L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal""
-                    FROM ""{_schema}"".""INV1"" L
-                    INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = L.""DocEntry""
-                    {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
-                    ORDER BY L.""DocEntry"", L.""LineNum""";
-
-                using (var command = new OdbcCommand(lineQuery, connection))
-                {
-                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
-                    using var reader = await command.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var docEntry = reader.GetInt32(0);
-                        if (!invoices.TryGetValue(docEntry, out var inv)) continue;
-                        var lineTotalNet = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
-                        var gross = reader.IsDBNull(8) ? lineTotalNet : reader.GetDecimal(8);
-                        inv.Lines.Add(new ErpInvoiceLineDto
-                        {
-                            SortOrder = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                            ErpItemCode = reader.IsDBNull(2) ? null : reader.GetString(2),
-                            Description = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                            Quantity = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
-                            UnitPrice = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
-                            TaxableAmount = lineTotalNet,
-                            VatRate = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
-                            VatAmount = gross - lineTotalNet,
-                            LineTotal = gross,
-                        });
-                    }
-                }
-
-                // 2b) Date di incasso per rata (ORCT/RCT2), best-effort: arricchisce PaidAt sullo
-                // scadenzario. Non incide sullo stato (calcolato dal portale su importi/scadenza):
-                // è isolato in un try/catch così che, se lo schema di riconciliazione differisse su
-                // questa company, PaidAt resti null senza rompere il mirror finanziario.
-                var paidAtByInst = new Dictionary<(int DocEntry, int InstId), DateTime>();
-                try
-                {
-                    var paidAtQuery = $@"
-                        SELECT R.""InvoiceId"", R.""InstId"", MAX(P.""DocDate"") AS ""PaidAt""
-                        FROM ""{_schema}"".""RCT2"" R
-                        INNER JOIN ""{_schema}"".""ORCT"" P ON P.""DocEntry"" = R.""DocNum""
-                        INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = R.""InvoiceId""
-                        WHERE R.""InvType"" = 13 AND P.""Canceled"" = 'N'
-                        {(since.HasValue ? @"AND H.""UpdateDate"" >= ?" : string.Empty)}
-                        GROUP BY R.""InvoiceId"", R.""InstId""";
-
-                    using var paidAtCommand = new OdbcCommand(paidAtQuery, connection);
-                    if (since.HasValue) paidAtCommand.Parameters.AddWithValue("@Since", since.Value);
-                    using var paidAtReader = await paidAtCommand.ExecuteReaderAsync();
-                    while (await paidAtReader.ReadAsync())
-                    {
-                        if (paidAtReader.IsDBNull(0) || paidAtReader.IsDBNull(1) || paidAtReader.IsDBNull(2)) continue;
-                        // InstId, come INV6.InstlmntID, è SMALLINT su HANA: Convert.ToInt32 evita InvalidCast.
-                        paidAtByInst[(paidAtReader.GetInt32(0), Convert.ToInt32(paidAtReader.GetValue(1)))] = paidAtReader.GetDateTime(2);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Date di incasso per rata non disponibili (RCT2/ORCT): PaidAt resterà null.");
-                }
-
-                // 3) Scadenzario/rate (INV6)
-                var instQuery = $@"
-                    SELECT
-                        I.""DocEntry"", I.""InstlmntID"", I.""DueDate"", I.""InsTotal"", I.""PaidToDate""
-                    FROM ""{_schema}"".""INV6"" I
-                    INNER JOIN ""{_schema}"".""OINV"" H ON H.""DocEntry"" = I.""DocEntry""
-                    {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
-                    ORDER BY I.""DocEntry"", I.""InstlmntID""";
-
-                using (var command = new OdbcCommand(instQuery, connection))
-                {
-                    if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
-                    using var reader = await command.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var docEntry = reader.GetInt32(0);
-                        if (!invoices.TryGetValue(docEntry, out var inv)) continue;
-                        // INV6.InstlmntID è SMALLINT (Int16) nello schema HANA: GetInt32 lancia InvalidCast.
-                        var instId = reader.IsDBNull(1) ? inv.Installments.Count + 1 : Convert.ToInt32(reader.GetValue(1));
-                        inv.Installments.Add(new ErpPaymentInstallmentDto
-                        {
-                            InstallmentNumber = instId,
-                            DueDate = reader.IsDBNull(2) ? (inv.DueDate ?? default) : reader.GetDateTime(2),
-                            Amount = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
-                            PaidAmount = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
-                            PaidAt = paidAtByInst.TryGetValue((docEntry, instId), out var pa) ? pa : null,
-                        });
-                    }
-                }
+                // Note di credito A/R (ORIN / RIN1 / RIN6, ObjType 14): stesso shape delle fatture ma con
+                // importi NEGATI e flag IsCreditNote, così il portale le somma come riduzione di fatturato ed
+                // esposizione. Il numero documento è prefissato "NC-" per non collidere, lato idempotenza
+                // portale (TenantId+Provider+ErpDocNumber), con eventuali fatture aventi lo stesso DocNum.
+                result.AddRange(await ReadInvoiceDocumentsAsync(
+                    connection, "ORIN", "RIN1", "RIN6", invType: 14, isCreditNote: true, since));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving invoices from database (since={Since})", since);
                 throw;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Legge un blocco di documenti A/R (testate + righe + scadenzario + date incasso) da una coppia di
+        /// tabelle SAP B1 omologhe: OINV/INV1/INV6 (fatture) oppure ORIN/RIN1/RIN6 (note di credito). Per le
+        /// note di credito (<paramref name="isCreditNote"/>) tutti gli importi sono restituiti con segno negativo.
+        /// </summary>
+        private async Task<List<ErpInvoiceDto>> ReadInvoiceDocumentsAsync(
+            OdbcConnection connection, string headerTable, string lineTable, string instTable,
+            int invType, bool isCreditNote, DateTime? since)
+        {
+            var invoices = new Dictionary<int, ErpInvoiceDto>();
+            var sign = isCreditNote ? -1m : 1m;
+
+            // Gli UDF di correlazione AX.360 (U_AX360_InvId/DocType) sono provvisti SOLO su OINV/ODRF
+            // (vedi EnsureAx360UserFieldsAsync), non su ORIN: le note di credito non nascono mai da una
+            // bozza spinta da AX, quindi per le NC NON selezioniamo quelle colonne (non esistono su ORIN
+            // e farebbero fallire l'intera query, rompendo anche il sync delle fatture).
+            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+            var udfDocType = Ax360Udf.Col(Ax360Udf.DocType);
+            var udfSelect = isCreditNote ? string.Empty : $@", T.""{udfInvId}"", T.""{udfDocType}""";
+            // Watermark incrementale: filtra per data di ULTIMA MODIFICA (UpdateDate), non per data di
+            // emissione (DocDate). Quando in SAP B1 si applica un incasso, il documento viene aggiornato
+            // (cambia PaidToDate) e UpdateDate avanza: filtrando su UpdateDate il sync incrementale
+            // rivede i documenti saldati e propaga lo stato di pagamento. Filtrando su DocDate, invece,
+            // un incasso su un documento già emesso non rientrerebbe MAI nel fetch incrementale e lo stato
+            // resterebbe congelato a "aperto/scaduto" per sempre.
+            var sinceClause = since.HasValue ? @"WHERE T.""UpdateDate"" >= ?" : string.Empty;
+
+            // 1) Testate
+            var headerQuery = $@"
+                SELECT
+                    T.""DocEntry"", T.""DocNum"", T.""CardCode"",
+                    T.""DocDate"", T.""DocDueDate"", T.""DocCur"",
+                    T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments""{udfSelect}
+                FROM ""{_schema}"".""{headerTable}"" T
+                {sinceClause}
+                ORDER BY T.""DocDate"", T.""DocEntry""";
+
+            using (var command = new OdbcCommand(headerQuery, connection))
+            {
+                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var docEntry = reader.GetInt32(0);
+                    var docTotal = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
+                    var vatSum = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7);
+                    // Colonne UDF presenti solo per le fatture (indici 10/11); assenti per le note di credito.
+                    var docType = isCreditNote || reader.IsDBNull(11) ? null : reader.GetString(11);
+                    var ax360InvId = isCreditNote || reader.IsDBNull(10) ? null : NullIfEmpty(reader.GetString(10));
+                    var docNum = reader.IsDBNull(1) ? docEntry.ToString() : reader.GetInt32(1).ToString();
+                    var dto = new ErpInvoiceDto
+                    {
+                        ErpDocId = docEntry.ToString(),
+                        ErpDocNumber = isCreditNote ? $"NC-{docNum}" : docNum,
+                        IsCreditNote = isCreditNote,
+                        ErpCustomerCode = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        IssueDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                        DueDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                        Currency = reader.IsDBNull(5) ? "EUR" : reader.GetString(5),
+                        TotalAmount = sign * docTotal,
+                        VatAmount = sign * vatSum,
+                        TaxableAmount = sign * (docTotal - vatSum),
+                        PaidAmount = sign * (reader.IsDBNull(8) ? 0m : reader.GetDecimal(8)),
+                        Notes = reader.IsDBNull(9) ? null : reader.GetString(9),
+                        Ax360InvoiceId = ax360InvId,
+                        DocType = string.IsNullOrWhiteSpace(docType) ? "altro" : docType!,
+                    };
+                    invoices[docEntry] = dto;
+                }
+            }
+
+            if (invoices.Count == 0) return new List<ErpInvoiceDto>();
+
+            // 2) Righe
+            var lineQuery = $@"
+                SELECT
+                    L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
+                    L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal""
+                FROM ""{_schema}"".""{lineTable}"" L
+                INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = L.""DocEntry""
+                {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
+                ORDER BY L.""DocEntry"", L.""LineNum""";
+
+            using (var command = new OdbcCommand(lineQuery, connection))
+            {
+                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var docEntry = reader.GetInt32(0);
+                    if (!invoices.TryGetValue(docEntry, out var inv)) continue;
+                    var lineTotalNet = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
+                    var gross = reader.IsDBNull(8) ? lineTotalNet : reader.GetDecimal(8);
+                    inv.Lines.Add(new ErpInvoiceLineDto
+                    {
+                        SortOrder = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                        ErpItemCode = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        Description = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        Quantity = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                        UnitPrice = sign * (reader.IsDBNull(5) ? 0m : reader.GetDecimal(5)),
+                        TaxableAmount = sign * lineTotalNet,
+                        VatRate = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
+                        VatAmount = sign * (gross - lineTotalNet),
+                        LineTotal = sign * gross,
+                    });
+                }
+            }
+
+            // 2b) Date di incasso per rata (ORCT/RCT2), best-effort: arricchisce PaidAt sullo
+            // scadenzario. Non incide sullo stato (calcolato dal portale su importi/scadenza):
+            // è isolato in un try/catch così che, se lo schema di riconciliazione differisse su
+            // questa company, PaidAt resti null senza rompere il mirror finanziario.
+            var paidAtByInst = new Dictionary<(int DocEntry, int InstId), DateTime>();
+            try
+            {
+                var paidAtQuery = $@"
+                    SELECT R.""InvoiceId"", R.""InstId"", MAX(P.""DocDate"") AS ""PaidAt""
+                    FROM ""{_schema}"".""RCT2"" R
+                    INNER JOIN ""{_schema}"".""ORCT"" P ON P.""DocEntry"" = R.""DocNum""
+                    INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = R.""InvoiceId""
+                    WHERE R.""InvType"" = {invType} AND P.""Canceled"" = 'N'
+                    {(since.HasValue ? @"AND H.""UpdateDate"" >= ?" : string.Empty)}
+                    GROUP BY R.""InvoiceId"", R.""InstId""";
+
+                using var paidAtCommand = new OdbcCommand(paidAtQuery, connection);
+                if (since.HasValue) paidAtCommand.Parameters.AddWithValue("@Since", since.Value);
+                using var paidAtReader = await paidAtCommand.ExecuteReaderAsync();
+                while (await paidAtReader.ReadAsync())
+                {
+                    if (paidAtReader.IsDBNull(0) || paidAtReader.IsDBNull(1) || paidAtReader.IsDBNull(2)) continue;
+                    // InstId, come INV6.InstlmntID, è SMALLINT su HANA: Convert.ToInt32 evita InvalidCast.
+                    paidAtByInst[(paidAtReader.GetInt32(0), Convert.ToInt32(paidAtReader.GetValue(1)))] = paidAtReader.GetDateTime(2);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Date di incasso per rata non disponibili (RCT2/ORCT) per {Header}: PaidAt resterà null.", headerTable);
+            }
+
+            // 3) Scadenzario/rate
+            var instQuery = $@"
+                SELECT
+                    I.""DocEntry"", I.""InstlmntID"", I.""DueDate"", I.""InsTotal"", I.""PaidToDate""
+                FROM ""{_schema}"".""{instTable}"" I
+                INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = I.""DocEntry""
+                {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
+                ORDER BY I.""DocEntry"", I.""InstlmntID""";
+
+            using (var command = new OdbcCommand(instQuery, connection))
+            {
+                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var docEntry = reader.GetInt32(0);
+                    if (!invoices.TryGetValue(docEntry, out var inv)) continue;
+                    // INV6.InstlmntID è SMALLINT (Int16) nello schema HANA: GetInt32 lancia InvalidCast.
+                    var instId = reader.IsDBNull(1) ? inv.Installments.Count + 1 : Convert.ToInt32(reader.GetValue(1));
+                    inv.Installments.Add(new ErpPaymentInstallmentDto
+                    {
+                        InstallmentNumber = instId,
+                        DueDate = reader.IsDBNull(2) ? (inv.DueDate ?? default) : reader.GetDateTime(2),
+                        Amount = sign * (reader.IsDBNull(3) ? 0m : reader.GetDecimal(3)),
+                        PaidAmount = sign * (reader.IsDBNull(4) ? 0m : reader.GetDecimal(4)),
+                        PaidAt = paidAtByInst.TryGetValue((docEntry, instId), out var pa) ? pa : null,
+                    });
+                }
             }
 
             return invoices.Values.ToList();
