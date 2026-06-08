@@ -1095,8 +1095,13 @@ namespace AX.SAPB1.Api.Services
             var invoices = new Dictionary<int, ErpInvoiceDto>();
             var sign = isCreditNote ? -1m : 1m;
 
+            // Gli UDF di correlazione AX.360 (U_AX360_InvId/DocType) sono provvisti SOLO su OINV/ODRF
+            // (vedi EnsureAx360UserFieldsAsync), non su ORIN: le note di credito non nascono mai da una
+            // bozza spinta da AX, quindi per le NC NON selezioniamo quelle colonne (non esistono su ORIN
+            // e farebbero fallire l'intera query, rompendo anche il sync delle fatture).
             var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
             var udfDocType = Ax360Udf.Col(Ax360Udf.DocType);
+            var udfSelect = isCreditNote ? string.Empty : $@", T.""{udfInvId}"", T.""{udfDocType}""";
             // Watermark incrementale: filtra per data di ULTIMA MODIFICA (UpdateDate), non per data di
             // emissione (DocDate). Quando in SAP B1 si applica un incasso, il documento viene aggiornato
             // (cambia PaidToDate) e UpdateDate avanza: filtrando su UpdateDate il sync incrementale
@@ -1110,8 +1115,7 @@ namespace AX.SAPB1.Api.Services
                 SELECT
                     T.""DocEntry"", T.""DocNum"", T.""CardCode"",
                     T.""DocDate"", T.""DocDueDate"", T.""DocCur"",
-                    T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments"",
-                    T.""{udfInvId}"", T.""{udfDocType}""
+                    T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments""{udfSelect}
                 FROM ""{_schema}"".""{headerTable}"" T
                 {sinceClause}
                 ORDER BY T.""DocDate"", T.""DocEntry""";
@@ -1125,7 +1129,9 @@ namespace AX.SAPB1.Api.Services
                     var docEntry = reader.GetInt32(0);
                     var docTotal = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6);
                     var vatSum = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7);
-                    var docType = reader.IsDBNull(11) ? null : reader.GetString(11);
+                    // Colonne UDF presenti solo per le fatture (indici 10/11); assenti per le note di credito.
+                    var docType = isCreditNote || reader.IsDBNull(11) ? null : reader.GetString(11);
+                    var ax360InvId = isCreditNote || reader.IsDBNull(10) ? null : NullIfEmpty(reader.GetString(10));
                     var docNum = reader.IsDBNull(1) ? docEntry.ToString() : reader.GetInt32(1).ToString();
                     var dto = new ErpInvoiceDto
                     {
@@ -1141,7 +1147,7 @@ namespace AX.SAPB1.Api.Services
                         TaxableAmount = sign * (docTotal - vatSum),
                         PaidAmount = sign * (reader.IsDBNull(8) ? 0m : reader.GetDecimal(8)),
                         Notes = reader.IsDBNull(9) ? null : reader.GetString(9),
-                        Ax360InvoiceId = reader.IsDBNull(10) ? null : NullIfEmpty(reader.GetString(10)),
+                        Ax360InvoiceId = ax360InvId,
                         DocType = string.IsNullOrWhiteSpace(docType) ? "altro" : docType!,
                     };
                     invoices[docEntry] = dto;
