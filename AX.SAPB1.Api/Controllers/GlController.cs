@@ -111,16 +111,30 @@ namespace AX.SAPB1.Api.Controllers
         /// Righe di conto economico registrate nella finestra indicata (per data di registrazione).
         /// Il chiamante rilegge la finestra intera e fa mark-and-sweep: non esiste un incrementale, perché
         /// le registrazioni vengono modificate in place e cancellate senza lasciare traccia in una data.
+        /// Paginabile con <paramref name="skip"/>/<paramref name="take"/>: <c>take = 0</c> (default) significa
+        /// nessuna paginazione, per retrocompatibilità con il chiamante in produzione.
         /// </summary>
         [HttpGet("lines")]
-        public async Task<ActionResult<IEnumerable<GlLineDto>>> GetLines([FromQuery] DateTime from, [FromQuery] DateTime to)
+        public async Task<ActionResult<IEnumerable<GlLineDto>>> GetLines(
+            [FromQuery] DateTime from,
+            [FromQuery] DateTime to,
+            [FromQuery] int skip = 0,
+            [FromQuery] int take = 0)
         {
             if (from == default || to == default)
                 return BadRequest("Parametri 'from' e 'to' obbligatori.");
             if (to < from)
                 return BadRequest("'to' non può precedere 'from'.");
+            if (skip < 0)
+                return BadRequest("skip non può essere negativo.");
+            if (take < 0)
+                return BadRequest("take non può essere negativo.");
+            // Cap difensivo: take=0 significa "finestra intera" (comportamento storico, che il
+            // portale in produzione usa oggi); oltre 5000 righe per pagina la risposta non sta
+            // comodamente in memoria né nel timeout del chiamante.
+            if (take > 5000) take = 5000;
 
-            try { return Ok(await _db.GetGlLinesAsync(from, to)); }
+            try { return Ok(await _db.GetGlLinesAsync(from, to, skip, take)); }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Errore nel recupero delle righe di contabilità ({From} → {To}).", from, to);

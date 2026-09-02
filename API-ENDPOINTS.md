@@ -393,6 +393,11 @@ Endpoint consumati dal connettore `SapB1ErpConnector` di AX.360. Autenticazione 
 | --- | --- | --- |
 | GET | `/api/ledger?customerCode=&since=` | Movimenti di partitario (`JDT1`/`OJDT`) con saldo progressivo. |
 
+### Contabilità generale (conto economico)
+| Metodo | Path | Descrizione |
+| --- | --- | --- |
+| GET | `/api/gl/lines?from=&to=&skip=&take=` | Righe di conto economico nella finestra `[from, to]` (per data di registrazione). Nessun incrementale: il chiamante rilegge la finestra e fa mark-and-sweep (vedi commento sul metodo). `skip` (default `0`) e `take` (default `0`) sono opzionali e retrocompatibili: `take=0` significa **nessuna paginazione**, la finestra intera come oggi. Con `take > 0` la query pagina in modo stabile (l'`ORDER BY RefDate, TransId, Line_ID` è totale, quindi le pagine non si sovrappongono e non perdono righe); `take` è cappato server-side a `5000`. Il chiamante che pagina deve leggere **tutte** le pagine prima di considerare completo il giro, o il mark-and-sweep lato portale cancellerebbe dal mirror le righe non ancora lette. |
+
 ### Campi utente (UDF) di correlazione
 Creati automaticamente all'avvio (best-effort, via `UserFieldsMD`) su `OINV` e `ODRF`:
 - `U_AX360_InvId` — codice interno AX.360 (Invoice.Id): chiave di correlazione stabile, si propaga da bozza a definitivo;

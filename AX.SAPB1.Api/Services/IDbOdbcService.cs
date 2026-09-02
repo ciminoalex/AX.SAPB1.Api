@@ -47,7 +47,7 @@ namespace AX.SAPB1.Api.Services
         Task<IEnumerable<GlFiscalProjectDto>> GetGlFiscalProjectsAsync();
         Task<IEnumerable<GlDimensionDto>> GetGlDimensionsAsync();
         Task<IEnumerable<GlDistributionRuleDto>> GetGlDistributionRulesAsync();
-        Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to);
+        Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to, int skip = 0, int take = 0);
         Task<IEnumerable<GlLineDto>> GetGlLinesByEntryIdsAsync(IReadOnlyCollection<int> entryIds);
 
         /// <summary>Fattura/NC di origine (testata + righe prodotti) di una registrazione JDT1, per l'anteprima. Null se il tipo non ha un documento con righe.</summary>

@@ -189,8 +189,14 @@ namespace AX.SAPB1.Api.Services
         /// cancellazioni. Con 3.400-5.500 righe l'anno la rilettura integrale della finestra costa nulla
         /// ed è esatta; il portale la completa con un mark-and-sweep.
         /// </para>
+        ///
+        /// <para><b>Paginazione.</b> Con <paramref name="take"/> &gt; 0 la query restituisce una
+        /// finestra di <c>take</c> righe a partire da <c>skip</c>. L'ORDER BY è già totale
+        /// (RefDate, TransId, Line_ID è unico), quindi le pagine non si sovrappongono e non
+        /// perdono righe. <b>Il chiamante deve leggere TUTTE le pagine prima dello sweep</b>:
+        /// fermarsi a metà farebbe cancellare dal mirror le righe non ancora lette.</para>
         /// </summary>
-        public async Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to)
+        public async Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to, int skip = 0, int take = 0)
         {
             var result = new List<GlLineDto>();
             using var connection = await CreateOpenConnectionAsync();
@@ -214,11 +220,19 @@ namespace AX.SAPB1.Api.Services
                 WHERE {CeGroupMaskFilter} AND {NoOpenCloseFilter}
                   AND J.""RefDate"" >= ? AND J.""RefDate"" <= ?
                 ORDER BY J.""RefDate"", J.""TransId"", J.""Line_ID""";
+            if (take > 0) query += "\n                    LIMIT ? OFFSET ?";
 
             using var command = new OdbcCommand(query, connection);
             command.CommandTimeout = WriteCommandTimeoutSeconds;
             command.Parameters.AddWithValue("@From", from.Date);
             command.Parameters.AddWithValue("@To", to.Date);
+            if (take > 0)
+            {
+                // I parametri ODBC sono POSIZIONALI: il nome è decorativo, conta solo l'ordine di
+                // aggiunta, che deve seguire l'ordine dei '?' nel testo SQL.
+                command.Parameters.AddWithValue("@Take", take);
+                command.Parameters.AddWithValue("@Skip", skip);
+            }
 
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
