@@ -27,6 +27,11 @@ namespace AX.SAPB1.Api.Services
         private const string CeGroupMaskFilter = @"A.""GroupMask"" IN (4,5,6,7,8)";
         private const string NoOpenCloseFilter = @"J.""TransType"" NOT IN ('-2','-3')";
 
+        // Cap difensivo sulla paginazione di /api/gl/lines. Condiviso con GlController (stesso assembly,
+        // referenziato come DbOdbcService.MaxGlLinesTake): il servizio deve essere corretto a prescindere
+        // dal chiamante, quindi non basta il cap nel controller.
+        internal const int MaxGlLinesTake = 5000;
+
         private int WriteCommandTimeoutSeconds =>
             int.TryParse(_configuration["SapB1:Write:CommandTimeoutSeconds"], out var v) && v > 0 ? v : 120;
 
@@ -198,6 +203,11 @@ namespace AX.SAPB1.Api.Services
         /// </summary>
         public async Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to, int skip = 0, int take = 0)
         {
+            // Difesa nel servizio, non solo nel controller: il servizio deve essere corretto a
+            // prescindere da chi lo chiama.
+            skip = Math.Max(0, skip);
+            take = Math.Clamp(take, 0, MaxGlLinesTake);
+
             var result = new List<GlLineDto>();
             using var connection = await CreateOpenConnectionAsync();
 
@@ -220,19 +230,20 @@ namespace AX.SAPB1.Api.Services
                 WHERE {CeGroupMaskFilter} AND {NoOpenCloseFilter}
                   AND J.""RefDate"" >= ? AND J.""RefDate"" <= ?
                 ORDER BY J.""RefDate"", J.""TransId"", J.""Line_ID""";
-            if (take > 0) query += "\n                    LIMIT ? OFFSET ?";
+            // LIMIT/OFFSET come letterali interi, non come parametri bind (? ?). Questo è l'unico uso di
+            // LIMIT/OFFSET in tutto il repo: non c'è un precedente che dimostri che HDBODBC accetti un
+            // marcatore di parametro lì, e il percorso HTTP→ODBC→HANA non è verificabile da ogni ambiente
+            // di sviluppo. Molti driver ODBC vogliono valori letterali in questa clausola. Concatenare
+            // valori in una query è normalmente vietato, e qui resta legittimo solo perché skip/take sono
+            // int (non stringhe) e arrivano già clampati sopra (Math.Max/Math.Clamp): non c'è alcuna
+            // superficie di injection, e lasciarli come parametri lascerebbe aperta una domanda sul driver
+            // a cui nessuno può rispondere prima della produzione.
+            if (take > 0) query += $"\n                    LIMIT {take} OFFSET {skip}";
 
             using var command = new OdbcCommand(query, connection);
             command.CommandTimeout = WriteCommandTimeoutSeconds;
             command.Parameters.AddWithValue("@From", from.Date);
             command.Parameters.AddWithValue("@To", to.Date);
-            if (take > 0)
-            {
-                // I parametri ODBC sono POSIZIONALI: il nome è decorativo, conta solo l'ordine di
-                // aggiunta, che deve seguire l'ordine dei '?' nel testo SQL.
-                command.Parameters.AddWithValue("@Take", take);
-                command.Parameters.AddWithValue("@Skip", skip);
-            }
 
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())

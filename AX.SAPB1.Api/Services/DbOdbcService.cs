@@ -13,6 +13,14 @@ namespace AX.SAPB1.Api.Services
     /// </summary>
     public partial class DbOdbcService : IDbOdbcService
     {
+        // Ponte progetto→contabilità: il campo standard SAP è FIPROJECT; su questo impianto convive con
+        // l'UDF U_SGS_PRJ_PrjCode, che su 43 progetti è l'unico valorizzato — dove ci sono entrambi
+        // coincidono sempre (verificato su 77 casi, orfani zero). COALESCE + NULLIF perché SAP scrive
+        // stringa vuota, non NULL. Presuppone l'alias T. sulla tabella OPMG (verificarlo prima di
+        // riusarla altrove). Usata in GetProjectsAsync e GetProjectsByCustomerAsync: un solo punto da
+        // cambiare se la derivazione cambia.
+        private const string FiscalProjectCodeExpression = @"COALESCE(NULLIF(T.""FIPROJECT"", ''), T.""U_SGS_PRJ_PrjCode"")";
+
         private readonly string _connectionString;
         private readonly string _schema;
         private readonly IConfiguration _configuration;
@@ -794,17 +802,14 @@ namespace AX.SAPB1.Api.Services
                 await connection.OpenAsync();
 
                 // Includo i dati cliente del progetto (CardCode/CardName) richiesti dal portale AX (ErpProjectDto).
-                // FiscalProjectCode: il ponte verso la contabilità. Il campo standard SAP è FIPROJECT; su questo
-                // impianto convive con l'UDF U_SGS_PRJ_PrjCode, che su 43 progetti è l'unico valorizzato — dove
-                // ci sono entrambi coincidono sempre (verificato su 77 casi, orfani zero). COALESCE + NULLIF
-                // perché SAP scrive stringa vuota, non NULL.
+                // FiscalProjectCode: vedi FiscalProjectCodeExpression per il perché del COALESCE+NULLIF.
                 var query = $@"
                     SELECT
                         T.""AbsEntry"" AS ""Code"",
                         T.""NAME"" AS ""Name"",
                         T.""CARDCODE"" AS ""CardCode"",
                         C.""CardName"" AS ""CardName"",
-                        COALESCE(NULLIF(T.""FIPROJECT"", ''), T.""U_SGS_PRJ_PrjCode"") AS ""FiscalProjectCode""
+                        {FiscalProjectCodeExpression} AS ""FiscalProjectCode""
                     FROM ""{_schema}"".""OPMG"" T
                     LEFT JOIN ""{_schema}"".""OCRD"" C ON C.""CardCode"" = T.""CARDCODE""
                     ORDER BY T.""NAME""";
@@ -921,12 +926,12 @@ namespace AX.SAPB1.Api.Services
 
                 // Projects linked to a BP via SAP B1 standard tables: OINV/RDR/OPRJ linkage varies by implementation.
                 // Here we leverage the timesheet source table if projects are referenced there by CardCode, else fallback to OPRJ + OCRD link via custom relations.
-                // FiscalProjectCode: stessa espressione di GetProjectsAsync, vedi commento lì per il perché del COALESCE+NULLIF.
+                // FiscalProjectCode: vedi FiscalProjectCodeExpression per il perché del COALESCE+NULLIF.
                 var query = $@"
                     SELECT
                         T.""AbsEntry"" AS ""Code"",
                         T.""NAME"" AS ""Name"",
-                        COALESCE(NULLIF(T.""FIPROJECT"", ''), T.""U_SGS_PRJ_PrjCode"") AS ""FiscalProjectCode""
+                        {FiscalProjectCodeExpression} AS ""FiscalProjectCode""
                     FROM ""{_schema}"".""OPMG"" T
                     WHERE T.""CARDCODE"" = ?
                     ORDER BY T.""NAME""";

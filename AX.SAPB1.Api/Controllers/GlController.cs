@@ -129,10 +129,14 @@ namespace AX.SAPB1.Api.Controllers
                 return BadRequest("skip non può essere negativo.");
             if (take < 0)
                 return BadRequest("take non può essere negativo.");
+            // take=0 significa "finestra intera": con uno skip valorizzato sarebbe una richiesta
+            // contraddittoria, e ignorarla in silenzio maschererebbe un bug del chiamante.
+            if (skip > 0 && take == 0) return BadRequest("skip richiede take > 0.");
             // Cap difensivo: take=0 significa "finestra intera" (comportamento storico, che il
-            // portale in produzione usa oggi); oltre 5000 righe per pagina la risposta non sta
-            // comodamente in memoria né nel timeout del chiamante.
-            if (take > 5000) take = 5000;
+            // portale in produzione usa oggi); oltre MaxGlLinesTake righe per pagina la risposta non
+            // sta comodamente in memoria né nel timeout del chiamante. Costante condivisa con
+            // DbOdbcService, che applica lo stesso cap indipendentemente dal chiamante.
+            if (take > DbOdbcService.MaxGlLinesTake) take = DbOdbcService.MaxGlLinesTake;
 
             try { return Ok(await _db.GetGlLinesAsync(from, to, skip, take)); }
             catch (Exception ex)
