@@ -378,7 +378,7 @@ Endpoint consumati dal connettore `SapB1ErpConnector` di AX.360. Autenticazione 
 | Metodo | Path | Note |
 | --- | --- | --- |
 | GET | `/api/lookup/customers` | Ora include `vatNumber`, `taxCode`, `address`, `email` (da `OCRD`). |
-| GET | `/api/lookup/projects` | Ora include `cardCode`, `cardName` (cliente del progetto, da `OPMG`→`OCRD`). |
+| GET | `/api/lookup/projects` | Ora include `cardCode`, `cardName` (cliente del progetto, da `OPMG`→`OCRD`) e `fiscalProjectCode` (codice progetto contabile, `OPMG.FIPROJECT`/UDF `U_SGS_PRJ_PrjCode`; `null` se non associato). Lo stesso campo è incluso anche in `/api/lookup/customers/{cardCode}/projects`. |
 | GET | `/api/lookup/projects/{code}/activities` | WBS del progetto. |
 | GET | `/api/lookup/resources` | Risorse. |
 

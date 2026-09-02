@@ -46,6 +46,13 @@ namespace AX.SAPB1.Api.Models
         // Dati cliente del progetto, consumati dal portale AX (ErpProjectDto): da OPMG.CARDCODE → OCRD.
         public string? CardCode { get; set; }
         public string? CardName { get; set; }
+
+        /// <summary>
+        /// Codice del progetto CONTABILE associato a questo progetto di project management.
+        /// Namespace disgiunto da <see cref="Code"/>: qui codici come "PRJ26_2600016", là chiavi
+        /// surrogate numeriche. null quando il progetto non ha ancora un contabile associato.
+        /// </summary>
+        public string? FiscalProjectCode { get; set; }
     }
 
     public class ProjectLookupDetail
