@@ -696,7 +696,7 @@ namespace AX.SAPB1.Api.Services
             return user?.Identity?.Name ?? "sconosciuto";
         }
 
-        private static string? MapStatementSection(int groupMask) => groupMask switch
+        internal static string? MapStatementSection(int groupMask) => groupMask switch
         {
             4 => GlStatementSection.ProductionValue,
             5 => GlStatementSection.ProductionCost,
@@ -708,7 +708,7 @@ namespace AX.SAPB1.Api.Services
 
         // Mappatura verificata empiricamente su questo impianto incrociando TransId con i documenti:
         // 13→OINV, 18→OPCH, 14→ORIN, 19→ORPC hanno tutti corrisposto al 100%.
-        private static string MapSourceDocType(string? transType) => transType switch
+        internal static string MapSourceDocType(string? transType) => transType switch
         {
             "13" => GlSourceDocType.SalesInvoice,
             "18" => GlSourceDocType.PurchaseInvoice,
@@ -719,7 +719,7 @@ namespace AX.SAPB1.Api.Services
             _ => GlSourceDocType.Other,
         };
 
-        private static string? MapCounterpartyType(string? transType, string? cardCode)
+        internal static string? MapCounterpartyType(string? transType, string? cardCode)
         {
             if (string.IsNullOrWhiteSpace(cardCode)) return null;
             return transType switch
