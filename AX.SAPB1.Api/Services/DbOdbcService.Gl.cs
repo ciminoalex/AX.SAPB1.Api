@@ -223,7 +223,8 @@ namespace AX.SAPB1.Api.Services
                        J.""Debit"", J.""Credit"", J.""LineMemo"",
                        COALESCE(OI.""CardCode"", OP.""CardCode"", RI.""CardCode"", RP.""CardCode"") AS ""CardCode"",
                        COALESCE(OI.""CardName"", OP.""CardName"", RI.""CardName"", RP.""CardName"") AS ""CardName"",
-                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode""
+                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode"",
+                       W.""WorkProjectCode""
                 FROM ""{_schema}"".""JDT1"" J
                 INNER JOIN ""{_schema}"".""OACT"" A ON A.""AcctCode"" = J.""Account""
                 INNER JOIN ""{_schema}"".""OJDT"" H ON H.""TransId"" = J.""TransId""
@@ -231,6 +232,7 @@ namespace AX.SAPB1.Api.Services
                 LEFT JOIN ""{_schema}"".""OPCH"" OP ON OP.""TransId"" = J.""TransId""
                 LEFT JOIN ""{_schema}"".""ORIN"" RI ON RI.""TransId"" = J.""TransId""
                 LEFT JOIN ""{_schema}"".""ORPC"" RP ON RP.""TransId"" = J.""TransId""
+                {WorkProjectJoin}
                 WHERE {CeGroupMaskFilter} AND {NoOpenCloseFilter}
                   AND J.""RefDate"" >= ? AND J.""RefDate"" <= ?
                 ORDER BY J.""RefDate"", J.""TransId"", J.""Line_ID""";
@@ -270,6 +272,7 @@ namespace AX.SAPB1.Api.Services
                     SourceDocNumber = reader.IsDBNull(8) ? null : reader.GetString(8),
                     ErpProjectCode = NullIfEmpty(reader, 9),
                     HeaderProjectCode = NullIfEmpty(reader, 18),
+                    WorkProjectCode = NullIfEmpty(reader, 19),
                     Dimension1Code = NullIfEmpty(reader, 10),
                     Dimension2Code = NullIfEmpty(reader, 11),
                     Dimension3Code = NullIfEmpty(reader, 12),
@@ -285,6 +288,39 @@ namespace AX.SAPB1.Api.Services
             return result;
         }
 
+        /// <summary>
+        /// LEFT JOIN che porta sulla riga contabile il codice progetto <b>contabile</b> del lavoro fatturato,
+        /// ricavato dai timesheet collegati alle righe del documento d'origine: <c>INV1/RIN1."U_SGS_PRJ_TmsCode"</c>
+        /// → <c>@SGS_PRJ_OTMS."U_Project"</c> (= <c>OPMG."AbsEntry"</c>) → <c>OPMG."FIPROJECT"</c>.
+        /// <para>Esiste perché le fatture T&amp;M generate dal tool di gestione progetto dicono, riga per riga,
+        /// quale timesheet fatturano: è un'informazione più precisa del codice di testata (misurato il
+        /// 14/09/2026: su 89 righe 2026 con entrambi, 11 testate indicavano il T&amp;M di un altro cliente o di
+        /// un'altra commessa), e sulle fatture 2025 la testata è quasi sempre vuota.</para>
+        /// <para>Il codice si dà <b>solo se univoco</b>: per (registrazione, conto) TUTTE le righe del documento
+        /// devono avere un timesheet con un progetto che ha il codice contabile, e il codice dev'essere uno
+        /// solo (<c>MIN &lt;&gt; ''</c> e <c>COUNT DISTINCT = 1</c>). Una fattura mista o parziale non propone
+        /// nulla: meglio una riga da attribuire a mano che una attribuita a metà. Solo fatture e note di credito
+        /// di vendita; sola lettura; non sostituisce mai il progetto di riga (lo decide il portale).</para>
+        /// </summary>
+        private string WorkProjectJoin => $@"LEFT JOIN (
+                    SELECT D.""TransId"", D.""AcctCode"", MAX(D.""FP"") AS ""WorkProjectCode""
+                    FROM (
+                        SELECT DH.""TransId"", DL.""AcctCode"", IFNULL(DP.""FIPROJECT"", '') AS ""FP""
+                        FROM ""{_schema}"".""OINV"" DH
+                        INNER JOIN ""{_schema}"".""INV1"" DL ON DL.""DocEntry"" = DH.""DocEntry""
+                        LEFT JOIN ""{_schema}"".""@SGS_PRJ_OTMS"" DT ON DT.""Code"" = DL.""U_SGS_PRJ_TmsCode""
+                        LEFT JOIN ""{_schema}"".""OPMG"" DP ON TO_NVARCHAR(DP.""AbsEntry"") = DT.""U_Project""
+                        UNION ALL
+                        SELECT DH.""TransId"", DL.""AcctCode"", IFNULL(DP.""FIPROJECT"", '') AS ""FP""
+                        FROM ""{_schema}"".""ORIN"" DH
+                        INNER JOIN ""{_schema}"".""RIN1"" DL ON DL.""DocEntry"" = DH.""DocEntry""
+                        LEFT JOIN ""{_schema}"".""@SGS_PRJ_OTMS"" DT ON DT.""Code"" = DL.""U_SGS_PRJ_TmsCode""
+                        LEFT JOIN ""{_schema}"".""OPMG"" DP ON TO_NVARCHAR(DP.""AbsEntry"") = DT.""U_Project""
+                    ) D
+                    GROUP BY D.""TransId"", D.""AcctCode""
+                    HAVING MIN(D.""FP"") <> '' AND COUNT(DISTINCT D.""FP"") = 1
+                ) W ON W.""TransId"" = J.""TransId"" AND W.""AcctCode"" = J.""Account""";
+
         /// <summary>Re-sync mirato dopo una scrittura: chiude il cerchio senza rileggere l'intera finestra.</summary>
         public async Task<IEnumerable<GlLineDto>> GetGlLinesByEntryIdsAsync(IReadOnlyCollection<int> entryIds)
         {
@@ -299,12 +335,14 @@ namespace AX.SAPB1.Api.Services
             // la riga come la vedrebbe il sync completo, altrimenti il ripiego sparirebbe fino al giro dopo.
             var query = $@"
                 SELECT J.""TransId"", J.""Line_ID"", J.""Project"", J.""ProfitCode"", J.""OcrCode2"", J.""OcrCode3"",
-                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode""
+                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode"",
+                       W.""WorkProjectCode""
                 FROM ""{_schema}"".""JDT1"" J
                 LEFT JOIN ""{_schema}"".""OINV"" OI ON OI.""TransId"" = J.""TransId""
                 LEFT JOIN ""{_schema}"".""OPCH"" OP ON OP.""TransId"" = J.""TransId""
                 LEFT JOIN ""{_schema}"".""ORIN"" RI ON RI.""TransId"" = J.""TransId""
                 LEFT JOIN ""{_schema}"".""ORPC"" RP ON RP.""TransId"" = J.""TransId""
+                {WorkProjectJoin}
                 WHERE J.""TransId"" IN ({placeholders})
                 ORDER BY J.""TransId"", J.""Line_ID""";
 
@@ -321,6 +359,7 @@ namespace AX.SAPB1.Api.Services
                     ErpLineId = Convert.ToInt32(reader.GetValue(1)),
                     ErpProjectCode = NullIfEmpty(reader, 2),
                     HeaderProjectCode = NullIfEmpty(reader, 6),
+                    WorkProjectCode = NullIfEmpty(reader, 7),
                     Dimension1Code = NullIfEmpty(reader, 3),
                     Dimension2Code = NullIfEmpty(reader, 4),
                     Dimension3Code = NullIfEmpty(reader, 5),

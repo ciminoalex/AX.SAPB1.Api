@@ -129,6 +129,15 @@ namespace AX.SAPB1.Api.Models
         /// </summary>
         public string? HeaderProjectCode { get; set; }
 
+        /// <summary>
+        /// Codice progetto <b>contabile</b> del lavoro fatturato: ricavato dai timesheet collegati alle righe
+        /// del documento d'origine (fatture e note di credito di vendita), solo quando tutte le righe di quel
+        /// conto portano un timesheet con lo stesso codice. Più preciso della testata, che sulle fatture T&amp;M
+        /// a volte indica un'altra commessa. Come <see cref="HeaderProjectCode"/> è un ripiego per chi legge:
+        /// non è l'attribuzione della riga e non si riscrive mai verso l'ERP.
+        /// </summary>
+        public string? WorkProjectCode { get; set; }
+
         public string? Dimension1Code { get; set; }
         public string? Dimension2Code { get; set; }
         public string? Dimension3Code { get; set; }
