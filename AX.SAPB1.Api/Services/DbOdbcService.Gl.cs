@@ -213,13 +213,17 @@ namespace AX.SAPB1.Api.Services
 
             // La controparte si risolve dal documento d'origine. Un LEFT JOIN per tipo: i journal manuali
             // (il 65% delle righe) non ne hanno alcuna, ed è corretto che restino senza.
+            // Il progetto di TESTATA documento viaggia a parte e solo come ripiego: sulle fatture 2026 il
+            // codice è spesso scritto solo lì e JDT1."Project" resta vuoto. Non si usa OJDT."Project" (SAP non
+            // lo mantiene, vedi sopra) e non sostituisce mai il progetto di riga, che resta l'autorevole.
             var query = $@"
                 SELECT J.""TransId"", J.""Line_ID"", J.""Account"", A.""AcctName"", A.""GroupMask"",
                        J.""RefDate"", J.""DueDate"", H.""TransType"", J.""BaseRef"",
                        J.""Project"", J.""ProfitCode"", J.""OcrCode2"", J.""OcrCode3"",
                        J.""Debit"", J.""Credit"", J.""LineMemo"",
                        COALESCE(OI.""CardCode"", OP.""CardCode"", RI.""CardCode"", RP.""CardCode"") AS ""CardCode"",
-                       COALESCE(OI.""CardName"", OP.""CardName"", RI.""CardName"", RP.""CardName"") AS ""CardName""
+                       COALESCE(OI.""CardName"", OP.""CardName"", RI.""CardName"", RP.""CardName"") AS ""CardName"",
+                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode""
                 FROM ""{_schema}"".""JDT1"" J
                 INNER JOIN ""{_schema}"".""OACT"" A ON A.""AcctCode"" = J.""Account""
                 INNER JOIN ""{_schema}"".""OJDT"" H ON H.""TransId"" = J.""TransId""
@@ -265,6 +269,7 @@ namespace AX.SAPB1.Api.Services
                     SourceDocType = MapSourceDocType(transType),
                     SourceDocNumber = reader.IsDBNull(8) ? null : reader.GetString(8),
                     ErpProjectCode = NullIfEmpty(reader, 9),
+                    HeaderProjectCode = NullIfEmpty(reader, 18),
                     Dimension1Code = NullIfEmpty(reader, 10),
                     Dimension2Code = NullIfEmpty(reader, 11),
                     Dimension3Code = NullIfEmpty(reader, 12),
@@ -290,9 +295,16 @@ namespace AX.SAPB1.Api.Services
 
             // Placeholder generati contando gli input: mai concatenare i valori nel testo SQL.
             var placeholders = string.Join(",", entryIds.Select(_ => "?"));
+            // Stessa testata-ripiego della lettura per finestra: chi rilegge dopo una scrittura deve vedere
+            // la riga come la vedrebbe il sync completo, altrimenti il ripiego sparirebbe fino al giro dopo.
             var query = $@"
-                SELECT J.""TransId"", J.""Line_ID"", J.""Project"", J.""ProfitCode"", J.""OcrCode2"", J.""OcrCode3""
+                SELECT J.""TransId"", J.""Line_ID"", J.""Project"", J.""ProfitCode"", J.""OcrCode2"", J.""OcrCode3"",
+                       COALESCE(NULLIF(OI.""Project"",''), NULLIF(OP.""Project"",''), NULLIF(RI.""Project"",''), NULLIF(RP.""Project"",'')) AS ""HeaderProjectCode""
                 FROM ""{_schema}"".""JDT1"" J
+                LEFT JOIN ""{_schema}"".""OINV"" OI ON OI.""TransId"" = J.""TransId""
+                LEFT JOIN ""{_schema}"".""OPCH"" OP ON OP.""TransId"" = J.""TransId""
+                LEFT JOIN ""{_schema}"".""ORIN"" RI ON RI.""TransId"" = J.""TransId""
+                LEFT JOIN ""{_schema}"".""ORPC"" RP ON RP.""TransId"" = J.""TransId""
                 WHERE J.""TransId"" IN ({placeholders})
                 ORDER BY J.""TransId"", J.""Line_ID""";
 
@@ -308,6 +320,7 @@ namespace AX.SAPB1.Api.Services
                     ErpEntryId = Convert.ToInt32(reader.GetValue(0)),
                     ErpLineId = Convert.ToInt32(reader.GetValue(1)),
                     ErpProjectCode = NullIfEmpty(reader, 2),
+                    HeaderProjectCode = NullIfEmpty(reader, 6),
                     Dimension1Code = NullIfEmpty(reader, 3),
                     Dimension2Code = NullIfEmpty(reader, 4),
                     Dimension3Code = NullIfEmpty(reader, 5),

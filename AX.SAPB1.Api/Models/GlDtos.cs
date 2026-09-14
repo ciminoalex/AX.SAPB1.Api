@@ -120,6 +120,15 @@ namespace AX.SAPB1.Api.Models
         public string? ErpCounterpartyType { get; set; }
 
         public string? ErpProjectCode { get; set; }
+
+        /// <summary>
+        /// Codice progetto dichiarato sulla testata del documento d'origine (fattura o nota di credito),
+        /// quando esiste. Non è l'attribuzione della riga: serve solo come <b>ripiego</b> a chi legge, per le
+        /// righe che non portano un <see cref="ErpProjectCode"/> proprio. Null per i documenti senza testata
+        /// (journal manuali, pagamenti) o con testata vuota. Mai riscritto verso l'ERP.
+        /// </summary>
+        public string? HeaderProjectCode { get; set; }
+
         public string? Dimension1Code { get; set; }
         public string? Dimension2Code { get; set; }
         public string? Dimension3Code { get; set; }
