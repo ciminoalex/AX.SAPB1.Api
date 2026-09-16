@@ -643,6 +643,19 @@ namespace AX.SAPB1.Api.Services
         /// 16/09/2026), con uno scarto costante sulle più recenti, quindi rispondere con <c>Code</c>
         /// aggancerebbe al portale lo stato di un'altra riga di timesheet.
         /// </para>
+        /// <para>
+        /// La risposta porta anche <c>U_ResId</c>/<c>U_Project</c>/<c>U_Activity</c>/<c>U_Date</c> come
+        /// <see cref="TimesheetBillingState.ErpResourceCode"/>/<see cref="TimesheetBillingState.ErpProjectCode"/>/
+        /// <see cref="TimesheetBillingState.ErpActivityCode"/>/<see cref="TimesheetBillingState.WorkedOn"/>: è la
+        /// chiave di riserva per l'abbinamento per attributi delle 414 righe del portale senza <c>ErpDocId</c>
+        /// (misurato il 16/09/2026 — 120 mai spinte a SAP, 293 marcate "da non esportare" perché inserite a
+        /// mano in SAP). Colonne aggiunte in coda alla SELECT apposta per non spostare gli ordinali già in
+        /// uso sopra. Lette con la stessa prudenza di <c>U_TimeNrNet</c> — mai <c>GetInt32</c>/<c>GetDecimal</c>
+        /// diretto, che su questo impianto possono fallire perché la colonna arriva come testo — vedi
+        /// <see cref="ParseErpText"/>. <c>U_Activity</c> viene trasportato SENZA normalizzare lo zero-padding
+        /// (SAP "7" vs portale "07", vedi <see cref="TimesheetBillingState.ErpActivityCode"/>): il confronto
+        /// tollerante è compito del portale.
+        /// </para>
         /// </summary>
         public async Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to)
         {
@@ -654,7 +667,8 @@ namespace AX.SAPB1.Api.Services
 
                 var query = $@"
                     SELECT T.""DocEntry"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
-                           H.""DocNum"", H.""DocDate""
+                           H.""DocNum"", H.""DocDate"",
+                           T.""U_ResId"", T.""U_Project"", T.""U_Activity"", T.""U_Date""
                     FROM ""{_schema}"".""@SGS_PRJ_OTMS"" T
                     LEFT JOIN ""{_schema}"".""OINV"" H ON T.""U_DestType"" = '13' AND H.""DocEntry"" = T.""U_DestEntry""
                     WHERE T.""Canceled"" = 'N' AND T.""U_Date"" >= ? AND T.""U_Date"" <= ?
@@ -679,6 +693,11 @@ namespace AX.SAPB1.Api.Services
                         InvoiceErpDocNumber = reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
                         InvoicedOn = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
                         Hours = ParseHours(reader.IsDBNull(4) ? null : reader.GetValue(4)),
+                        // Ordinali 7-10: chiave di riserva per l'abbinamento per attributi, vedi doc del metodo.
+                        ErpResourceCode = ParseErpText(reader.IsDBNull(7) ? null : reader.GetValue(7)),
+                        ErpProjectCode = ParseErpText(reader.IsDBNull(8) ? null : reader.GetValue(8)),
+                        ErpActivityCode = ParseErpText(reader.IsDBNull(9) ? null : reader.GetValue(9)),
+                        WorkedOn = ParseWorkedOn(reader.IsDBNull(10) ? null : reader.GetValue(10)),
                     });
                 }
             }
@@ -725,6 +744,37 @@ namespace AX.SAPB1.Api.Services
                     NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
                  ? parsed
                  : 0m,
+        };
+
+        /// <summary>
+        /// Legge una colonna testuale di <c>@SGS_PRJ_OTMS</c> usata come chiave di riserva (<c>U_ResId</c>,
+        /// <c>U_Project</c>, <c>U_Activity</c>): su questo impianto una colonna concettualmente stringa può
+        /// arrivare dal driver ODBC tipizzata numerica (è già successo con <c>U_TimeNrNet</c>, vedi
+        /// <see cref="ParseHours"/>), quindi mai <c>GetInt32</c>/<c>GetDecimal</c> diretto sull'ordinale. La
+        /// conversione a stringa è sempre a cultura invariante: un identificativo trasportato non deve
+        /// cambiare forma in base alla cultura del server.
+        /// </summary>
+        internal static string? ParseErpText(object? raw) => raw switch
+        {
+            null or DBNull => null,
+            string s => s,
+            _ => Convert.ToString(raw, CultureInfo.InvariantCulture),
+        };
+
+        /// <summary>
+        /// Legge <c>@SGS_PRJ_OTMS.U_Date</c> per la chiave di riserva dell'abbinamento per attributi, con la
+        /// stessa prudenza delle altre colonne di questa query: se il driver la restituisce già come
+        /// <see cref="DateTime"/> la usa, altrimenti prova un parsing a cultura invariante. Un valore
+        /// illeggibile vale "data assente" (non fa fallire l'intera finestra per una riga sola).
+        /// </summary>
+        internal static DateTime? ParseWorkedOn(object? raw) => raw switch
+        {
+            null or DBNull => null,
+            DateTime dt => dt,
+            _ => DateTime.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var parsed)
+                 ? parsed
+                 : null,
         };
 
         public async Task<IEnumerable<CustomerSummary>> GetCustomersAsync()

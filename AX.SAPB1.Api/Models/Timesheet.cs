@@ -215,6 +215,15 @@ namespace AX.SAPB1.Api.Models
     /// <c>Code</c> «7121») — quindi rispondere con <c>Code</c> farebbe agganciare al portale lo stato di
     /// un'altra riga di timesheet: ore marcate come fatturate per una fattura che non le riguarda.
     /// </para>
+    /// <para>
+    /// <see cref="ErpResourceCode"/>, <see cref="ErpProjectCode"/>, <see cref="ErpActivityCode"/> e
+    /// <see cref="WorkedOn"/> non sono decorazione: sono la <b>chiave di riserva</b> per le righe di
+    /// timesheet del portale che non hanno mai ricevuto <see cref="ErpDocId"/> — misurate in produzione il
+    /// 16/09/2026, 414 righe (120 mai spinte a SAP, 293 marcate "da non esportare" perché inserite a mano
+    /// direttamente in SAP). Per queste il portale non ha alcun identificativo da correlare e deve abbinare
+    /// per attributi (risorsa + progetto + attività + data). Direzione decisa dal titolare: si legge da SAP
+    /// e si aggiorna il portale, non il contrario — questo endpoint resta sola lettura.
+    /// </para>
     /// </summary>
     public class TimesheetBillingState
     {
@@ -223,5 +232,21 @@ namespace AX.SAPB1.Api.Models
         public string? InvoiceErpDocNumber { get; set; }       // OINV.DocNum
         public DateTime? InvoicedOn { get; set; }               // OINV.DocDate
         public decimal Hours { get; set; }                     // U_TimeNrNet
+
+        // Chiave di riserva per l'abbinamento per attributi (vedi doc di classe): U_ResId, il codice
+        // persona SAP (es. "Dip_41_MioNoe").
+        public string? ErpResourceCode { get; set; }
+
+        // U_Project: identificativo di progetto SAP, numerico ma trasportato come stringa (stesso motivo
+        // di ErpDocId — il contratto verso il portale è ERP-neutro).
+        public string? ErpProjectCode { get; set; }
+
+        // U_Activity, trasportato COSÌ COM'È, senza normalizzare lo zero-padding: su SAP arriva "7", sul
+        // portale la stessa attività è salvata "07". Il confronto tollerante alla differenza è compito del
+        // portale, non di questo servizio.
+        public string? ErpActivityCode { get; set; }
+
+        // U_Date: la data della rendicontazione in SAP, per l'abbinamento per attributi.
+        public DateTime? WorkedOn { get; set; }
     }
 }

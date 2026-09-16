@@ -49,3 +49,51 @@ public class TimesheetHoursParsingTests
         yield return new object?[] { 3, 3m };
     }
 }
+
+/// <summary>
+/// La lettura della chiave di riserva (<c>U_ResId</c>/<c>U_Project</c>/<c>U_Activity</c>) usata per
+/// l'abbinamento per attributi delle 414 righe del portale senza <c>ErpDocId</c>. Il caso che conta è
+/// l'intero: su questo impianto una colonna concettualmente testuale (es. <c>U_Project</c> "48") può
+/// arrivare dal driver ODBC già tipizzata numerica, e la conversione deve restare a cultura invariante
+/// (mai <c>Convert.ToString</c> implicito con la cultura del server).
+/// </summary>
+public class TimesheetErpTextParsingTests
+{
+    [Theory]
+    [MemberData(nameof(Casi))]
+    public void Il_valore_grezzo_della_colonna_diventa_testo_ERP_neutro(object? raw, string? atteso)
+        => Assert.Equal(atteso, DbOdbcService.ParseErpText(raw));
+
+    public static IEnumerable<object?[]> Casi()
+    {
+        yield return new object?[] { null, null };
+        yield return new object?[] { DBNull.Value, null };
+        yield return new object?[] { "Dip_41_MioNoe", "Dip_41_MioNoe" };
+        yield return new object?[] { "07", "07" };
+        yield return new object?[] { "7", "7" };
+        yield return new object?[] { 48, "48" };
+        yield return new object?[] { 48m, "48" };
+    }
+}
+
+/// <summary>
+/// La lettura di <c>U_Date</c> per la stessa chiave di riserva: deve accettare sia un <see cref="DateTime"/>
+/// già tipizzato dal driver sia una stringa, senza mai far cadere l'intera finestra per una riga con un
+/// valore illeggibile (che diventa "data assente", non un'eccezione).
+/// </summary>
+public class TimesheetWorkedOnParsingTests
+{
+    [Theory]
+    [MemberData(nameof(Casi))]
+    public void Il_valore_grezzo_di_U_Date_diventa_la_data_lavorata(object? raw, DateTime? atteso)
+        => Assert.Equal(atteso, DbOdbcService.ParseWorkedOn(raw));
+
+    public static IEnumerable<object?[]> Casi()
+    {
+        yield return new object?[] { null, null };
+        yield return new object?[] { DBNull.Value, null };
+        yield return new object?[] { new DateTime(2026, 3, 4), new DateTime(2026, 3, 4) };
+        yield return new object?[] { "2026-03-04", new DateTime(2026, 3, 4) };
+        yield return new object?[] { "non una data", null };
+    }
+}

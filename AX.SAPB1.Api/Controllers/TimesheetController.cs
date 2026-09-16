@@ -143,6 +143,11 @@ namespace AX.SAPB1.Api.Controllers
         /// Stato di fatturazione delle righe di timesheet nella finestra [from, to], con la fattura che le
         /// porta quando esiste. Sola lettura: non scrive mai verso SAP. Contratto ERP-neutro, consumato dal
         /// sync del portale (nessun nome SAP nella risposta).
+        /// <para>
+        /// Porta anche la chiave di riserva per l'abbinamento per attributi (risorsa, progetto, attività,
+        /// data) — vedi <see cref="TimesheetBillingState"/> — per le righe del portale che non hanno
+        /// mai ricevuto l'identificativo SAP al momento del push.
+        /// </para>
         /// </summary>
         [HttpGet("billing-state")]
         public async Task<ActionResult<IEnumerable<TimesheetBillingState>>> GetBillingState(
