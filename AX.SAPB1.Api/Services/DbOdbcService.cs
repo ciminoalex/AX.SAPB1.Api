@@ -667,7 +667,7 @@ namespace AX.SAPB1.Api.Services
                         State = MapBillingState(status, destType),
                         InvoiceErpDocNumber = reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
                         InvoicedOn = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                        Hours = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                        Hours = ParseHours(reader.IsDBNull(4) ? null : reader.GetValue(4)),
                     });
                 }
             }
@@ -693,6 +693,27 @@ namespace AX.SAPB1.Api.Services
             "Confermato" => "confirmed",
             "Inserito" => "draft",
             _ => "draft",
+        };
+
+        /// <summary>
+        /// Legge <c>@SGS_PRJ_OTMS.U_TimeNrNet</c>, che su alcune righe arriva come testo invece che come numero.
+        /// Le ore non passano mai da <c>Convert.ToDecimal</c>: quello userebbe la cultura del server, dove un
+        /// "2.5" diventerebbe 25 in silenzio, e solleverebbe un'eccezione su stringa vuota facendo cadere
+        /// l'intera finestra di sincronizzazione per colpa di una riga sola. Un valore illeggibile vale zero ore.
+        /// </summary>
+        internal static decimal ParseHours(object? raw) => raw switch
+        {
+            null or DBNull => 0m,
+            decimal d => d,
+            double dbl => (decimal)dbl,
+            float f => (decimal)f,
+            int i => i,
+            long l => l,
+            short s => s,
+            _ => decimal.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim(),
+                    NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
+                 ? parsed
+                 : 0m,
         };
 
         public async Task<IEnumerable<CustomerSummary>> GetCustomersAsync()
