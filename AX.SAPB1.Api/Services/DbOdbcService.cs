@@ -754,12 +754,25 @@ namespace AX.SAPB1.Api.Services
         /// conversione a stringa è sempre a cultura invariante: un identificativo trasportato non deve
         /// cambiare forma in base alla cultura del server.
         /// </summary>
-        internal static string? ParseErpText(object? raw) => raw switch
+        /// <summary>
+        /// I valori tornano ripuliti degli spazi ai bordi: le colonne di SAP sono spesso a lunghezza fissa e
+        /// restituiscono la coda riempita di spazi. Il portale confronta questi codici per uguaglianza —
+        /// risorsa, progetto e attività sono la chiave di riserva per le righe che non ha mai spinto — e uno
+        /// spazio invisibile in coda non farebbe fallire niente in modo rumoroso: farebbe semplicemente
+        /// abbinare zero righe, cioè sembrerebbe che la funzione non serva a nulla.
+        /// Una stringa vuota o di soli spazi vale null: è un'assenza, non un codice.
+        /// </summary>
+        internal static string? ParseErpText(object? raw)
         {
-            null or DBNull => null,
-            string s => s,
-            _ => Convert.ToString(raw, CultureInfo.InvariantCulture),
-        };
+            var text = raw switch
+            {
+                null or DBNull => null,
+                string s => s,
+                _ => Convert.ToString(raw, CultureInfo.InvariantCulture),
+            };
+            text = text?.Trim();
+            return string.IsNullOrEmpty(text) ? null : text;
+        }
 
         /// <summary>
         /// Legge <c>@SGS_PRJ_OTMS.U_Date</c> per la chiave di riserva dell'abbinamento per attributi, con la

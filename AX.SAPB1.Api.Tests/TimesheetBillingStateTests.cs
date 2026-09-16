@@ -73,6 +73,14 @@ public class TimesheetErpTextParsingTests
         yield return new object?[] { "7", "7" };
         yield return new object?[] { 48, "48" };
         yield return new object?[] { 48m, "48" };
+        // Le colonne a lunghezza fissa di SAP tornano con la coda riempita di spazi. Il portale confronta
+        // questi codici per uguaglianza: uno spazio invisibile non romperebbe niente in modo rumoroso,
+        // farebbe abbinare zero righe — cioè sembrerebbe che la funzione non serva.
+        yield return new object?[] { "Dip_41_MioNoe   ", "Dip_41_MioNoe" };
+        yield return new object?[] { "  07 ", "07" };
+        // Una stringa vuota o di soli spazi è un'assenza, non un codice: vale null come il NULL SQL.
+        yield return new object?[] { "", null };
+        yield return new object?[] { "   ", null };
     }
 }
 
