@@ -628,11 +628,14 @@ namespace AX.SAPB1.Api.Services
         /// la fattura che le porta quando <c>U_DestType = '13'</c>. Sola lettura: nessuna scrittura verso SAP.
         /// <para>
         /// Misurato il 16/09/2026 su dati di produzione: <c>U_Status</c> prende esattamente tre valori —
-        /// «Fatturato» (1.351 righe, sempre con <c>U_DestType</c> valorizzato), «Confermato» (5.619),
-        /// «Inserito» (49). <c>U_DestType</c> è alfanumerico su questo impianto: si confronta con la stringa
-        /// <c>'13'</c>, mai con un intero. <c>U_TimeNrNet</c> è testo su alcune righe: conversione difensiva
-        /// via <c>Convert.ToDecimal</c> sul valore grezzo, come il resto del servizio (non <c>GetDecimal</c>,
-        /// che fallirebbe sulle righe testuali).
+        /// «Fatturato» (1.351 righe), «Confermato» (5.619), «Inserito» (49). Delle righe fatturate, 1.271
+        /// puntano a una fattura (<c>U_DestType '13'</c>), 75 a un ordine (<c>'17'</c>) e 5 a una consegna
+        /// (<c>'15'</c>): una riga può quindi risultare fatturata <b>senza</b> numero di fattura, e il join
+        /// con <c>OINV</c> resta volutamente un arricchimento facoltativo. <c>U_DestType</c> è alfanumerico
+        /// su questo impianto: si confronta con la stringa <c>'13'</c>, mai con un intero. <c>U_TimeNrNet</c>
+        /// è testo su alcune righe: si legge con <see cref="ParseHours"/>, mai con <c>GetDecimal</c> (che
+        /// fallirebbe sulle righe testuali) né con <c>Convert.ToDecimal</c> (che userebbe la cultura del
+        /// server).
         /// </para>
         /// </summary>
         public async Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to)
