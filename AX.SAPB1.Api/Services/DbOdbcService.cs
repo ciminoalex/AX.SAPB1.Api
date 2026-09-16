@@ -1,4 +1,5 @@
 using System.Data.Odbc;
+using System.Globalization;
 using AX.SAPB1.Api.Models;
 using Microsoft.AspNetCore.Http;
 using System.IdentityModel.Tokens.Jwt;
@@ -6,22 +7,35 @@ using System.Security.Claims;
 
 namespace AX.SAPB1.Api.Services
 {
-    public class DbOdbcService : IDbOdbcService
+    /// <summary>
+    /// Accesso ODBC diretto a SAP B1 su HANA. La contabilità generale — lettura del conto economico e
+    /// scrittura dell'attribuzione analitica — vive nella partial <c>DbOdbcService.Gl.cs</c>.
+    /// </summary>
+    public partial class DbOdbcService : IDbOdbcService
     {
+        // Ponte progetto→contabilità: il campo standard SAP è FIPROJECT; su questo impianto convive con
+        // l'UDF U_SGS_PRJ_PrjCode, che su 43 progetti è l'unico valorizzato — dove ci sono entrambi
+        // coincidono sempre (verificato su 77 casi, orfani zero). COALESCE + NULLIF perché SAP scrive
+        // stringa vuota, non NULL. Presuppone l'alias T. sulla tabella OPMG (verificarlo prima di
+        // riusarla altrove). Usata in GetProjectsAsync e GetProjectsByCustomerAsync: un solo punto da
+        // cambiare se la derivazione cambia.
+        private const string FiscalProjectCodeExpression = @"COALESCE(NULLIF(T.""FIPROJECT"", ''), T.""U_SGS_PRJ_PrjCode"")";
+
         private readonly string _connectionString;
         private readonly string _schema;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<DbOdbcService> _logger;
         private readonly IHttpContextAccessor _httpContextAccessor;
 
         public DbOdbcService(IConfiguration configuration, ILogger<DbOdbcService> logger, IHttpContextAccessor httpContextAccessor)
         {
-            _connectionString = configuration.GetConnectionString("DefaultDatabase") 
+            _connectionString = configuration.GetConnectionString("DefaultDatabase")
                 ?? throw new ArgumentNullException(nameof(configuration), "DefaultDatabase connection string not found");
 
             _schema = configuration["SapB1:CompanyDB"]
                 ?? throw new ArgumentNullException(nameof(configuration), "Schema not defined");
 
-
+            _configuration = configuration;
             _logger = logger;
             _httpContextAccessor = httpContextAccessor;
         }
@@ -609,6 +623,173 @@ namespace AX.SAPB1.Api.Services
             }
         }
 
+        /// <summary>
+        /// Stato di fatturazione delle righe di timesheet nella finestra [from, to] (per <c>U_Date</c>), con
+        /// la fattura che le porta quando <c>U_DestType = '13'</c>. Sola lettura: nessuna scrittura verso SAP.
+        /// <para>
+        /// Misurato il 16/09/2026 su dati di produzione: <c>U_Status</c> prende esattamente tre valori —
+        /// «Fatturato» (1.351 righe), «Confermato» (5.619), «Inserito» (49). Delle righe fatturate, 1.271
+        /// puntano a una fattura (<c>U_DestType '13'</c>), 75 a un ordine (<c>'17'</c>) e 5 a una consegna
+        /// (<c>'15'</c>): una riga può quindi risultare fatturata <b>senza</b> numero di fattura, e il join
+        /// con <c>OINV</c> resta volutamente un arricchimento facoltativo. <c>U_DestType</c> è alfanumerico
+        /// su questo impianto: si confronta con la stringa <c>'13'</c>, mai con un intero. <c>U_TimeNrNet</c>
+        /// è testo su alcune righe: si legge con <see cref="ParseHours"/>, mai con <c>GetDecimal</c> (che
+        /// fallirebbe sulle righe testuali) né con <c>Convert.ToDecimal</c> (che userebbe la cultura del
+        /// server).
+        /// </para>
+        /// <para>
+        /// La chiave restituita è <c>DocEntry</c>, <b>mai</b> <c>Code</c>: è quella che il portale riceve alla
+        /// creazione della riga e conserva. Le due colonne divergono su 826 righe di 7.019 (misurato il
+        /// 16/09/2026), con uno scarto costante sulle più recenti, quindi rispondere con <c>Code</c>
+        /// aggancerebbe al portale lo stato di un'altra riga di timesheet.
+        /// </para>
+        /// <para>
+        /// La risposta porta anche <c>U_ResId</c>/<c>U_Project</c>/<c>U_Activity</c>/<c>U_Date</c> come
+        /// <see cref="TimesheetBillingState.ErpResourceCode"/>/<see cref="TimesheetBillingState.ErpProjectCode"/>/
+        /// <see cref="TimesheetBillingState.ErpActivityCode"/>/<see cref="TimesheetBillingState.WorkedOn"/>: è la
+        /// chiave di riserva per l'abbinamento per attributi delle 414 righe del portale senza <c>ErpDocId</c>
+        /// (misurato il 16/09/2026 — 120 mai spinte a SAP, 293 marcate "da non esportare" perché inserite a
+        /// mano in SAP). Colonne aggiunte in coda alla SELECT apposta per non spostare gli ordinali già in
+        /// uso sopra. Lette con la stessa prudenza di <c>U_TimeNrNet</c> — mai <c>GetInt32</c>/<c>GetDecimal</c>
+        /// diretto, che su questo impianto possono fallire perché la colonna arriva come testo — vedi
+        /// <see cref="ParseErpText"/>. <c>U_Activity</c> viene trasportato SENZA normalizzare lo zero-padding
+        /// (SAP "7" vs portale "07", vedi <see cref="TimesheetBillingState.ErpActivityCode"/>): il confronto
+        /// tollerante è compito del portale.
+        /// </para>
+        /// </summary>
+        public async Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to)
+        {
+            var result = new List<TimesheetBillingState>();
+
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+
+                var query = $@"
+                    SELECT T.""DocEntry"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
+                           H.""DocNum"", H.""DocDate"",
+                           T.""U_ResId"", T.""U_Project"", T.""U_Activity"", T.""U_Date""
+                    FROM ""{_schema}"".""@SGS_PRJ_OTMS"" T
+                    LEFT JOIN ""{_schema}"".""OINV"" H ON T.""U_DestType"" = '13' AND H.""DocEntry"" = T.""U_DestEntry""
+                    WHERE T.""Canceled"" = 'N' AND T.""U_Date"" >= ? AND T.""U_Date"" <= ?
+                    ORDER BY T.""DocEntry""";
+
+                using var command = new OdbcCommand(query, connection);
+                command.Parameters.AddWithValue("@From", from.Date);
+                command.Parameters.AddWithValue("@To", to.Date);
+
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var status = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    var destType = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                    result.Add(new TimesheetBillingState
+                    {
+                        // DocEntry è numerico in SAP: si trasporta come stringa perché il contratto verso il
+                        // portale è ERP-neutro (un altro gestionale può avere un identificativo non numerico).
+                        ErpDocId = reader.IsDBNull(0) ? string.Empty : Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture) ?? string.Empty,
+                        State = MapBillingState(status, destType),
+                        InvoiceErpDocNumber = reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
+                        InvoicedOn = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                        Hours = ParseHours(reader.IsDBNull(4) ? null : reader.GetValue(4)),
+                        // Ordinali 7-10: chiave di riserva per l'abbinamento per attributi, vedi doc del metodo.
+                        ErpResourceCode = ParseErpText(reader.IsDBNull(7) ? null : reader.GetValue(7)),
+                        ErpProjectCode = ParseErpText(reader.IsDBNull(8) ? null : reader.GetValue(8)),
+                        ErpActivityCode = ParseErpText(reader.IsDBNull(9) ? null : reader.GetValue(9)),
+                        WorkedOn = ParseWorkedOn(reader.IsDBNull(10) ? null : reader.GetValue(10)),
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving timesheet billing states for date range {From} to {To} from database", from, to);
+                throw;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Traduce <c>@SGS_PRJ_OTMS.U_Status</c> nel contratto ERP-neutro. «Fatturato» vince sempre, anche
+        /// senza <c>U_DestType</c> valorizzato: lo stato SAP è la fonte di verità, il documento di
+        /// destinazione è solo un arricchimento che può mancare senza far retrocedere la riga a bozza.
+        /// Qualunque stato non riconosciuto — incluso null — diventa "draft": è la lettura prudente quando
+        /// la provenienza non è chiara.
+        /// </summary>
+        internal static string MapBillingState(string? status, string? destType) => status switch
+        {
+            "Fatturato" => "invoiced",
+            "Confermato" => "confirmed",
+            "Inserito" => "draft",
+            _ => "draft",
+        };
+
+        /// <summary>
+        /// Legge <c>@SGS_PRJ_OTMS.U_TimeNrNet</c>, che su alcune righe arriva come testo invece che come numero.
+        /// Le ore non passano mai da <c>Convert.ToDecimal</c>: quello userebbe la cultura del server, dove un
+        /// "2.5" diventerebbe 25 in silenzio, e solleverebbe un'eccezione su stringa vuota facendo cadere
+        /// l'intera finestra di sincronizzazione per colpa di una riga sola. Un valore illeggibile vale zero ore.
+        /// </summary>
+        internal static decimal ParseHours(object? raw) => raw switch
+        {
+            null or DBNull => 0m,
+            decimal d => d,
+            double dbl => (decimal)dbl,
+            float f => (decimal)f,
+            int i => i,
+            long l => l,
+            short s => s,
+            _ => decimal.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim(),
+                    NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
+                 ? parsed
+                 : 0m,
+        };
+
+        /// <summary>
+        /// Legge una colonna testuale di <c>@SGS_PRJ_OTMS</c> usata come chiave di riserva (<c>U_ResId</c>,
+        /// <c>U_Project</c>, <c>U_Activity</c>): su questo impianto una colonna concettualmente stringa può
+        /// arrivare dal driver ODBC tipizzata numerica (è già successo con <c>U_TimeNrNet</c>, vedi
+        /// <see cref="ParseHours"/>), quindi mai <c>GetInt32</c>/<c>GetDecimal</c> diretto sull'ordinale. La
+        /// conversione a stringa è sempre a cultura invariante: un identificativo trasportato non deve
+        /// cambiare forma in base alla cultura del server.
+        /// </summary>
+        /// <summary>
+        /// I valori tornano ripuliti degli spazi ai bordi: le colonne di SAP sono spesso a lunghezza fissa e
+        /// restituiscono la coda riempita di spazi. Il portale confronta questi codici per uguaglianza —
+        /// risorsa, progetto e attività sono la chiave di riserva per le righe che non ha mai spinto — e uno
+        /// spazio invisibile in coda non farebbe fallire niente in modo rumoroso: farebbe semplicemente
+        /// abbinare zero righe, cioè sembrerebbe che la funzione non serva a nulla.
+        /// Una stringa vuota o di soli spazi vale null: è un'assenza, non un codice.
+        /// </summary>
+        internal static string? ParseErpText(object? raw)
+        {
+            var text = raw switch
+            {
+                null or DBNull => null,
+                string s => s,
+                _ => Convert.ToString(raw, CultureInfo.InvariantCulture),
+            };
+            text = text?.Trim();
+            return string.IsNullOrEmpty(text) ? null : text;
+        }
+
+        /// <summary>
+        /// Legge <c>@SGS_PRJ_OTMS.U_Date</c> per la chiave di riserva dell'abbinamento per attributi, con la
+        /// stessa prudenza delle altre colonne di questa query: se il driver la restituisce già come
+        /// <see cref="DateTime"/> la usa, altrimenti prova un parsing a cultura invariante. Un valore
+        /// illeggibile vale "data assente" (non fa fallire l'intera finestra per una riga sola).
+        /// </summary>
+        internal static DateTime? ParseWorkedOn(object? raw) => raw switch
+        {
+            null or DBNull => null,
+            DateTime dt => dt,
+            _ => DateTime.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var parsed)
+                 ? parsed
+                 : null,
+        };
+
         public async Task<IEnumerable<CustomerSummary>> GetCustomersAsync()
         {
             var customers = new List<CustomerSummary>();
@@ -788,12 +969,14 @@ namespace AX.SAPB1.Api.Services
                 await connection.OpenAsync();
 
                 // Includo i dati cliente del progetto (CardCode/CardName) richiesti dal portale AX (ErpProjectDto).
+                // FiscalProjectCode: vedi FiscalProjectCodeExpression per il perché del COALESCE+NULLIF.
                 var query = $@"
                     SELECT
                         T.""AbsEntry"" AS ""Code"",
                         T.""NAME"" AS ""Name"",
                         T.""CARDCODE"" AS ""CardCode"",
-                        C.""CardName"" AS ""CardName""
+                        C.""CardName"" AS ""CardName"",
+                        {FiscalProjectCodeExpression} AS ""FiscalProjectCode""
                     FROM ""{_schema}"".""OPMG"" T
                     LEFT JOIN ""{_schema}"".""OCRD"" C ON C.""CardCode"" = T.""CARDCODE""
                     ORDER BY T.""NAME""";
@@ -807,7 +990,8 @@ namespace AX.SAPB1.Api.Services
                         Code = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString(),
                         Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
                         CardCode = reader.IsDBNull(2) ? null : reader.GetString(2),
-                        CardName = reader.IsDBNull(3) ? null : reader.GetString(3)
+                        CardName = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        FiscalProjectCode = NullIfEmpty(reader, 4)
                     });
                 }
             }
@@ -909,10 +1093,12 @@ namespace AX.SAPB1.Api.Services
 
                 // Projects linked to a BP via SAP B1 standard tables: OINV/RDR/OPRJ linkage varies by implementation.
                 // Here we leverage the timesheet source table if projects are referenced there by CardCode, else fallback to OPRJ + OCRD link via custom relations.
+                // FiscalProjectCode: vedi FiscalProjectCodeExpression per il perché del COALESCE+NULLIF.
                 var query = $@"
                     SELECT
                         T.""AbsEntry"" AS ""Code"",
-                        T.""NAME"" AS ""Name""
+                        T.""NAME"" AS ""Name"",
+                        {FiscalProjectCodeExpression} AS ""FiscalProjectCode""
                     FROM ""{_schema}"".""OPMG"" T
                     WHERE T.""CARDCODE"" = ?
                     ORDER BY T.""NAME""";
@@ -925,7 +1111,8 @@ namespace AX.SAPB1.Api.Services
                     projects.Add(new ProjectSummary
                     {
                         Code = reader.IsDBNull(0) ? string.Empty : reader.GetInt32(0).ToString(),
-                        Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1)
+                        Name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                        FiscalProjectCode = NullIfEmpty(reader, 2)
                     });
                 }
             }
@@ -948,13 +1135,22 @@ namespace AX.SAPB1.Api.Services
                 // Read from common JWT claims to handle mapping differences
                 var principal = _httpContextAccessor.HttpContext?.User;
                 var jti = principal?.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
-                var userName =
-                    principal?.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
-                    ?? principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                    ?? principal?.Claims.FirstOrDefault(c => c.Type == "preferred_username")?.Value
-                    ?? principal?.Claims.FirstOrDefault(c => c.Type == "unique_name")?.Value
-                    ?? principal?.FindFirst(ClaimTypes.Name)?.Value;
-                _logger.LogDebug("GetResourcesAsync principal resolved: sub/name={User}, jti={Jti}", userName ?? "", jti ?? "");
+
+                // Chiamante machine-to-machine (header X-Api-Key, es. il portale AX.360): il principal non
+                // rappresenta un utente SAP, quindi il suo nome ("ax360-erp") non e' un OUSR.USER_CODE e
+                // filtrare su di esso restituirebbe SEMPRE zero risorse. Va trattato come "nessun utente",
+                // cioe' elenco completo delle risorse attive: e' il consumer che sceglie a chi abbinarle.
+                var isMachineClient = string.Equals(
+                    principal?.FindFirst("client_type")?.Value, "api_key", StringComparison.OrdinalIgnoreCase);
+
+                var userName = isMachineClient
+                    ? null
+                    : (principal?.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+                       ?? principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                       ?? principal?.Claims.FirstOrDefault(c => c.Type == "preferred_username")?.Value
+                       ?? principal?.Claims.FirstOrDefault(c => c.Type == "unique_name")?.Value
+                       ?? principal?.FindFirst(ClaimTypes.Name)?.Value);
+                _logger.LogDebug("GetResourcesAsync principal resolved: sub/name={User}, jti={Jti}, machineClient={Machine}", userName ?? "", jti ?? "", isMachineClient);
                 var query = $@"
                     SELECT DISTINCT
                         T0.""ResCode"" AS ""Code"",
@@ -974,8 +1170,10 @@ namespace AX.SAPB1.Api.Services
                 command.Connection = connection;
                 if (string.IsNullOrWhiteSpace(userName))
                 {
-                    // Auth disabilitata o token non disponibile: restituisce tutte le risorse attive.
-                    _logger.LogInformation("GetResourcesAsync: missing JWT user claim, returning all active resources");
+                    // Client M2M, auth disabilitata o token non disponibile: tutte le risorse attive.
+                    _logger.LogInformation(
+                        "GetResourcesAsync: nessun utente SAP nel contesto (machineClient={Machine}), restituisco tutte le risorse attive",
+                        isMachineClient);
                     command.CommandText = query + @" ORDER BY T0.""ResName""";
                 }
                 else
@@ -1282,12 +1480,17 @@ namespace AX.SAPB1.Api.Services
                 var whereClause = "WHERE " + string.Join(" AND ", conditions);
 
                 // JDT1 = righe di registrazione contabile; OJDT = testata (TransType per classificazione).
+                // JDT1."ShortName" vale il CardCode sulle righe di business partner ma il codice CONTO su
+                // quelle di contabilita': senza il join su OCRD questo endpoint restituirebbe l'intero libro
+                // giornale (157k righe su MTF contro 15k di partitario clienti), che il consumer scarta
+                // comunque non trovando il cliente. Qui si serve il partitario CLIENTI, come da contratto.
                 var query = $@"
                     SELECT
                         J.""ShortName"", J.""TransId"", J.""Ref1"", J.""RefDate"", J.""DueDate"",
                         J.""Debit"", J.""Credit"", J.""LineMemo"", H.""TransType""
                     FROM ""{_schema}"".""JDT1"" J
                     INNER JOIN ""{_schema}"".""OJDT"" H ON H.""TransId"" = J.""TransId""
+                    INNER JOIN ""{_schema}"".""OCRD"" C ON C.""CardCode"" = J.""ShortName"" AND C.""CardType"" = 'C'
                     {whereClause}
                     ORDER BY J.""ShortName"", J.""RefDate"", J.""TransId""";
 
@@ -1312,7 +1515,7 @@ namespace AX.SAPB1.Api.Services
                         ErpDocNumber = reader.IsDBNull(2) ? (reader.IsDBNull(1) ? string.Empty : reader.GetInt32(1).ToString()) : reader.GetString(2),
                         EntryDate = reader.IsDBNull(3) ? default : reader.GetDateTime(3),
                         DueDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-                        DocType = MapLedgerDocType(reader.IsDBNull(8) ? (int?)null : reader.GetInt32(8)),
+                        DocType = MapLedgerDocType(ReadNullableInt(reader, 8)),
                         Description = reader.IsDBNull(7) ? null : reader.GetString(7),
                         Currency = "EUR",
                         Debit = debit,
@@ -1369,6 +1572,29 @@ namespace AX.SAPB1.Api.Services
         }
 
         private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+        /// <summary>
+        /// Legge un intero da una colonna il cui tipo HANA non e' garantito numerico.
+        /// Serve per OJDT."TransType", che su HANA e' NVARCHAR(20) con valori "13"/"24"/"-2":
+        /// <c>GetInt32</c> ci lanciava InvalidCastException facendo fallire l'intero partitario.
+        /// Tollera anche INTEGER/SMALLINT, cosi' regge differenze di schema tra company.
+        /// </summary>
+        private static int? ReadNullableInt(System.Data.Common.DbDataReader reader, int ordinal)
+        {
+            if (reader.IsDBNull(ordinal)) return null;
+            var raw = reader.GetValue(ordinal);
+            return raw switch
+            {
+                int i => i,
+                short s => s,
+                long l => (int)l,
+                decimal d => (int)d,
+                _ => int.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim(),
+                        NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                     ? parsed
+                     : null,
+            };
+        }
 
         private static string MapLedgerDocType(int? transType) => transType switch
         {

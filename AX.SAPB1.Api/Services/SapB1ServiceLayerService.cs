@@ -721,6 +721,12 @@ namespace AX.SAPB1.Api.Services
                         };
                         if (!string.IsNullOrWhiteSpace(defaultVatGroup))
                             line["VatGroup"] = defaultVatGroup;
+                        // Dimensioni analitiche di riga (in MTF: 2=Risorsa, 3=Business Unit).
+                        // Omesse quando non valorizzate: SAP lascia il default del conto.
+                        if (!string.IsNullOrWhiteSpace(l.CostingCode2))
+                            line["CostingCode2"] = l.CostingCode2;
+                        if (!string.IsNullOrWhiteSpace(l.CostingCode3))
+                            line["CostingCode3"] = l.CostingCode3;
                         return line;
                     })
                     .ToList();

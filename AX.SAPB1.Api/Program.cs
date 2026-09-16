@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,6 +25,19 @@ builder.Logging.AddConsole(options =>
 });
 builder.Logging.AddDebug();
 builder.Logging.SetMinimumLevel(LogLevel.Debug);
+
+// Sink su file, obbligatorio: il servizio gira come Windows Service, quindi la console non esiste e
+// senza questo un UPDATE su dati contabili non lascerebbe alcuna traccia. La scrittura ODBC bypassa il
+// change log di SAP, quindi questo file è l'unico registro da cui ricostruire chi ha attribuito cosa —
+// e l'unica lista da cui ripartire per un ripristino manuale.
+builder.Logging.AddSerilog(new Serilog.LoggerConfiguration()
+    .MinimumLevel.Information()
+    .WriteTo.File(
+        path: Path.Combine(AppContext.BaseDirectory, "logs", "ax-sapb1-.log"),
+        rollingInterval: Serilog.RollingInterval.Day,
+        retainedFileCountLimit: 90,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .CreateLogger(), dispose: true);
 
 // Add services to the container.
 builder.Services.AddControllers();

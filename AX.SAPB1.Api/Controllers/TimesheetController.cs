@@ -140,6 +140,38 @@ namespace AX.SAPB1.Api.Controllers
         }
 
         /// <summary>
+        /// Stato di fatturazione delle righe di timesheet nella finestra [from, to], con la fattura che le
+        /// porta quando esiste. Sola lettura: non scrive mai verso SAP. Contratto ERP-neutro, consumato dal
+        /// sync del portale (nessun nome SAP nella risposta).
+        /// <para>
+        /// Porta anche la chiave di riserva per l'abbinamento per attributi (risorsa, progetto, attività,
+        /// data) — vedi <see cref="TimesheetBillingState"/> — per le righe del portale che non hanno
+        /// mai ricevuto l'identificativo SAP al momento del push.
+        /// </para>
+        /// </summary>
+        [HttpGet("billing-state")]
+        public async Task<ActionResult<IEnumerable<TimesheetBillingState>>> GetBillingState(
+            [FromQuery] DateTime from,
+            [FromQuery] DateTime to)
+        {
+            if (from == default || to == default)
+                return BadRequest("Parametri 'from' e 'to' obbligatori.");
+            if (to < from)
+                return BadRequest("'to' non può precedere 'from'.");
+            // Cap difensivo: oltre 400 giorni la finestra non ha più senso per un sync incrementale e la
+            // risposta rischia di non stare comodamente nel timeout del chiamante.
+            if ((to - from).TotalDays > 400)
+                return BadRequest("La finestra 'from'-'to' non può superare 400 giorni.");
+
+            try { return Ok(await _dbOdbcService.GetTimesheetBillingStatesAsync(from, to)); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving timesheet billing states for date range {From} to {To}", from, to);
+                return StatusCode(500, "Errore interno del server durante il recupero dello stato di fatturazione dei timesheet");
+            }
+        }
+
+        /// <summary>
         /// Ottiene il totale delle ore per progetto e attività
         /// </summary>
         [HttpGet("activity-time-tot")]

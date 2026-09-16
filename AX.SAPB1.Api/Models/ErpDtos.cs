@@ -120,6 +120,16 @@ namespace AX.SAPB1.Api.Models
         public decimal VatRate { get; set; }
         public decimal VatAmount { get; set; }
         public decimal LineTotal { get; set; }
+
+        /// <summary>
+        /// Centro di costo della dimensione analitica 2 (in MTF: Risorsa) → DocumentLines.CostingCode2.
+        /// </summary>
+        public string? CostingCode2 { get; set; }
+
+        /// <summary>
+        /// Centro di costo della dimensione analitica 3 (in MTF: Business Unit) → DocumentLines.CostingCode3.
+        /// </summary>
+        public string? CostingCode3 { get; set; }
     }
 
     public class ErpInvoicePushResult

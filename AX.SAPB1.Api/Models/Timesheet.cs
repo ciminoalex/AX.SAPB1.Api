@@ -196,9 +196,57 @@ namespace AX.SAPB1.Api.Models
         public decimal? TimeNrNet { get; set; }
         
         public string? DescExt { get; set; }
-        
+
         public string? DescInt { get; set; }
-        
+
         public string? Status { get; set; }
+    }
+
+    /// <summary>
+    /// Stato di fatturazione di una riga di timesheet, contratto ERP-neutro (nessun nome SAP nel portale).
+    /// Sola lettura: <see cref="State"/> è la traduzione di <c>U_Status</c> (vedi
+    /// <see cref="Services.DbOdbcService.MapBillingState"/>), <see cref="InvoiceErpDocNumber"/> e
+    /// <see cref="InvoicedOn"/> la fattura che porta la riga quando <c>U_DestType = '13'</c>.
+    /// <para>
+    /// <see cref="ErpDocId"/> è <c>@SGS_PRJ_OTMS.DocEntry</c>, <b>non</b> <c>Code</c>: è l'identificativo che
+    /// il servizio restituisce al portale quando la riga viene creata (<c>POST</c> di timesheet) e che il
+    /// portale conserva. Le due colonne non coincidono — misurato il 16/09/2026 su 7.019 righe, 826 (11,8%)
+    /// hanno <c>Code</c> diverso da <c>DocEntry</c>, e sulle righe recenti lo scarto è costante (la 7128 porta
+    /// <c>Code</c> «7121») — quindi rispondere con <c>Code</c> farebbe agganciare al portale lo stato di
+    /// un'altra riga di timesheet: ore marcate come fatturate per una fattura che non le riguarda.
+    /// </para>
+    /// <para>
+    /// <see cref="ErpResourceCode"/>, <see cref="ErpProjectCode"/>, <see cref="ErpActivityCode"/> e
+    /// <see cref="WorkedOn"/> non sono decorazione: sono la <b>chiave di riserva</b> per le righe di
+    /// timesheet del portale che non hanno mai ricevuto <see cref="ErpDocId"/> — misurate in produzione il
+    /// 16/09/2026, 414 righe (120 mai spinte a SAP, 293 marcate "da non esportare" perché inserite a mano
+    /// direttamente in SAP). Per queste il portale non ha alcun identificativo da correlare e deve abbinare
+    /// per attributi (risorsa + progetto + attività + data). Direzione decisa dal titolare: si legge da SAP
+    /// e si aggiorna il portale, non il contrario — questo endpoint resta sola lettura.
+    /// </para>
+    /// </summary>
+    public class TimesheetBillingState
+    {
+        public string ErpDocId { get; set; } = string.Empty;   // @SGS_PRJ_OTMS.DocEntry (MAI Code)
+        public string State { get; set; } = string.Empty;      // "invoiced" | "confirmed" | "draft"
+        public string? InvoiceErpDocNumber { get; set; }       // OINV.DocNum
+        public DateTime? InvoicedOn { get; set; }               // OINV.DocDate
+        public decimal Hours { get; set; }                     // U_TimeNrNet
+
+        // Chiave di riserva per l'abbinamento per attributi (vedi doc di classe): U_ResId, il codice
+        // persona SAP (es. "Dip_41_MioNoe").
+        public string? ErpResourceCode { get; set; }
+
+        // U_Project: identificativo di progetto SAP, numerico ma trasportato come stringa (stesso motivo
+        // di ErpDocId — il contratto verso il portale è ERP-neutro).
+        public string? ErpProjectCode { get; set; }
+
+        // U_Activity, trasportato COSÌ COM'È, senza normalizzare lo zero-padding: su SAP arriva "7", sul
+        // portale la stessa attività è salvata "07". Il confronto tollerante alla differenza è compito del
+        // portale, non di questo servizio.
+        public string? ErpActivityCode { get; set; }
+
+        // U_Date: la data della rendicontazione in SAP, per l'abbinamento per attributi.
+        public DateTime? WorkedOn { get; set; }
     }
 }

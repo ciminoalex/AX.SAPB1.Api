@@ -12,6 +12,12 @@ namespace AX.SAPB1.Api.Services
         Task<IEnumerable<Timesheet>> GetTimesheetsByEmployeeAndDateRangeAsync(string employeeId, DateTime startDate, DateTime endDate);
         Task<string> GetNextTimesheetCodeAsync();
 
+        /// <summary>
+        /// Stato di fatturazione delle righe di timesheet nella finestra [from, to] (per <c>U_Date</c>),
+        /// con la fattura che le porta quando esiste. Sola lettura: non scrive mai verso SAP.
+        /// </summary>
+        Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to);
+
         // Lookups
         Task<IEnumerable<CustomerSummary>> GetCustomersAsync();
 
@@ -37,5 +43,28 @@ namespace AX.SAPB1.Api.Services
         /// AX.360 indicato nell'UDF di correlazione. Usato per evitare doppioni in fase di push.
         /// </summary>
         Task<ExistingErpDocument?> FindDocumentByCorrelationIdAsync(string ax360InvoiceId);
+
+        // ── Contabilità generale (lettura) ────────────────────────────────────
+        // Nota: distinta da GetLedgerAsync, che è il PARTITARIO CLIENTI (scadenzario/esposizione).
+        // Questi metodi leggono il conto economico riga per riga: sono cose diverse, il nome inganna.
+
+        Task<IEnumerable<GlAccountDto>> GetGlAccountsAsync();
+        Task<IEnumerable<GlFiscalPeriodDto>> GetGlFiscalPeriodsAsync();
+        Task<IEnumerable<GlFiscalProjectDto>> GetGlFiscalProjectsAsync();
+        Task<IEnumerable<GlDimensionDto>> GetGlDimensionsAsync();
+        Task<IEnumerable<GlDistributionRuleDto>> GetGlDistributionRulesAsync();
+        Task<IEnumerable<GlLineDto>> GetGlLinesAsync(DateTime from, DateTime to, int skip = 0, int take = 0);
+        Task<IEnumerable<GlLineDto>> GetGlLinesByEntryIdsAsync(IReadOnlyCollection<int> entryIds);
+
+        /// <summary>Fattura/NC di origine (testata + righe prodotti) di una registrazione JDT1, per l'anteprima. Null se il tipo non ha un documento con righe.</summary>
+        Task<ErpInvoiceDto?> GetSourceDocumentAsync(int transId, string? docType);
+
+        // ── Contabilità generale (scrittura) ──────────────────────────────────
+
+        /// <summary>
+        /// Aggiorna progetto e dimensioni analitiche sulle righe contabili indicate, in una sola
+        /// transazione. È l'UNICO write path SQL del servizio: tutto il resto passa dal Service Layer.
+        /// </summary>
+        Task<GlAttributionResult> UpdateGlAttributionAsync(GlAttributionRequest request);
     }
 }
