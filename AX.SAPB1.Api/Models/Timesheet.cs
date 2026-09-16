@@ -204,13 +204,21 @@ namespace AX.SAPB1.Api.Models
 
     /// <summary>
     /// Stato di fatturazione di una riga di timesheet, contratto ERP-neutro (nessun nome SAP nel portale).
-    /// Sola lettura: <see cref="ErpDocId"/> è <c>@SGS_PRJ_OTMS.Code</c>, <see cref="State"/> la traduzione
-    /// di <c>U_Status</c> (vedi <see cref="Services.DbOdbcService.MapBillingState"/>), <see cref="InvoiceErpDocNumber"/>
-    /// e <see cref="InvoicedOn"/> la fattura che porta la riga quando <c>U_DestType = '13'</c>.
+    /// Sola lettura: <see cref="State"/> è la traduzione di <c>U_Status</c> (vedi
+    /// <see cref="Services.DbOdbcService.MapBillingState"/>), <see cref="InvoiceErpDocNumber"/> e
+    /// <see cref="InvoicedOn"/> la fattura che porta la riga quando <c>U_DestType = '13'</c>.
+    /// <para>
+    /// <see cref="ErpDocId"/> è <c>@SGS_PRJ_OTMS.DocEntry</c>, <b>non</b> <c>Code</c>: è l'identificativo che
+    /// il servizio restituisce al portale quando la riga viene creata (<c>POST</c> di timesheet) e che il
+    /// portale conserva. Le due colonne non coincidono — misurato il 16/09/2026 su 7.019 righe, 826 (11,8%)
+    /// hanno <c>Code</c> diverso da <c>DocEntry</c>, e sulle righe recenti lo scarto è costante (la 7128 porta
+    /// <c>Code</c> «7121») — quindi rispondere con <c>Code</c> farebbe agganciare al portale lo stato di
+    /// un'altra riga di timesheet: ore marcate come fatturate per una fattura che non le riguarda.
+    /// </para>
     /// </summary>
     public class TimesheetBillingState
     {
-        public string ErpDocId { get; set; } = string.Empty;   // @SGS_PRJ_OTMS.Code
+        public string ErpDocId { get; set; } = string.Empty;   // @SGS_PRJ_OTMS.DocEntry (MAI Code)
         public string State { get; set; } = string.Empty;      // "invoiced" | "confirmed" | "draft"
         public string? InvoiceErpDocNumber { get; set; }       // OINV.DocNum
         public DateTime? InvoicedOn { get; set; }               // OINV.DocDate

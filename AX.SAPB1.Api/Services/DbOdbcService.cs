@@ -637,6 +637,12 @@ namespace AX.SAPB1.Api.Services
         /// fallirebbe sulle righe testuali) né con <c>Convert.ToDecimal</c> (che userebbe la cultura del
         /// server).
         /// </para>
+        /// <para>
+        /// La chiave restituita è <c>DocEntry</c>, <b>mai</b> <c>Code</c>: è quella che il portale riceve alla
+        /// creazione della riga e conserva. Le due colonne divergono su 826 righe di 7.019 (misurato il
+        /// 16/09/2026), con uno scarto costante sulle più recenti, quindi rispondere con <c>Code</c>
+        /// aggancerebbe al portale lo stato di un'altra riga di timesheet.
+        /// </para>
         /// </summary>
         public async Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to)
         {
@@ -647,12 +653,12 @@ namespace AX.SAPB1.Api.Services
                 using var connection = await CreateOpenConnectionAsync();
 
                 var query = $@"
-                    SELECT T.""Code"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
+                    SELECT T.""DocEntry"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
                            H.""DocNum"", H.""DocDate""
                     FROM ""{_schema}"".""@SGS_PRJ_OTMS"" T
                     LEFT JOIN ""{_schema}"".""OINV"" H ON T.""U_DestType"" = '13' AND H.""DocEntry"" = T.""U_DestEntry""
                     WHERE T.""Canceled"" = 'N' AND T.""U_Date"" >= ? AND T.""U_Date"" <= ?
-                    ORDER BY T.""Code""";
+                    ORDER BY T.""DocEntry""";
 
                 using var command = new OdbcCommand(query, connection);
                 command.Parameters.AddWithValue("@From", from.Date);
@@ -666,7 +672,9 @@ namespace AX.SAPB1.Api.Services
 
                     result.Add(new TimesheetBillingState
                     {
-                        ErpDocId = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                        // DocEntry è numerico in SAP: si trasporta come stringa perché il contratto verso il
+                        // portale è ERP-neutro (un altro gestionale può avere un identificativo non numerico).
+                        ErpDocId = reader.IsDBNull(0) ? string.Empty : Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture) ?? string.Empty,
                         State = MapBillingState(status, destType),
                         InvoiceErpDocNumber = reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
                         InvoicedOn = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
