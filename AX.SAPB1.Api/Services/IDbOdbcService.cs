@@ -12,6 +12,12 @@ namespace AX.SAPB1.Api.Services
         Task<IEnumerable<Timesheet>> GetTimesheetsByEmployeeAndDateRangeAsync(string employeeId, DateTime startDate, DateTime endDate);
         Task<string> GetNextTimesheetCodeAsync();
 
+        /// <summary>
+        /// Stato di fatturazione delle righe di timesheet nella finestra [from, to] (per <c>U_Date</c>),
+        /// con la fattura che le porta quando esiste. Sola lettura: non scrive mai verso SAP.
+        /// </summary>
+        Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to);
+
         // Lookups
         Task<IEnumerable<CustomerSummary>> GetCustomersAsync();
 

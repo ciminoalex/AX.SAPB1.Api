@@ -196,9 +196,24 @@ namespace AX.SAPB1.Api.Models
         public decimal? TimeNrNet { get; set; }
         
         public string? DescExt { get; set; }
-        
+
         public string? DescInt { get; set; }
-        
+
         public string? Status { get; set; }
+    }
+
+    /// <summary>
+    /// Stato di fatturazione di una riga di timesheet, contratto ERP-neutro (nessun nome SAP nel portale).
+    /// Sola lettura: <see cref="ErpDocId"/> è <c>@SGS_PRJ_OTMS.Code</c>, <see cref="State"/> la traduzione
+    /// di <c>U_Status</c> (vedi <see cref="Services.DbOdbcService.MapBillingState"/>), <see cref="InvoiceErpDocNumber"/>
+    /// e <see cref="InvoicedOn"/> la fattura che porta la riga quando <c>U_DestType = '13'</c>.
+    /// </summary>
+    public class TimesheetBillingState
+    {
+        public string ErpDocId { get; set; } = string.Empty;   // @SGS_PRJ_OTMS.Code
+        public string State { get; set; } = string.Empty;      // "invoiced" | "confirmed" | "draft"
+        public string? InvoiceErpDocNumber { get; set; }       // OINV.DocNum
+        public DateTime? InvoicedOn { get; set; }               // OINV.DocDate
+        public decimal Hours { get; set; }                     // U_TimeNrNet
     }
 }

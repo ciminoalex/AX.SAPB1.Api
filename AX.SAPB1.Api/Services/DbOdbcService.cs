@@ -623,6 +623,78 @@ namespace AX.SAPB1.Api.Services
             }
         }
 
+        /// <summary>
+        /// Stato di fatturazione delle righe di timesheet nella finestra [from, to] (per <c>U_Date</c>), con
+        /// la fattura che le porta quando <c>U_DestType = '13'</c>. Sola lettura: nessuna scrittura verso SAP.
+        /// <para>
+        /// Misurato il 16/09/2026 su dati di produzione: <c>U_Status</c> prende esattamente tre valori —
+        /// «Fatturato» (1.351 righe, sempre con <c>U_DestType</c> valorizzato), «Confermato» (5.619),
+        /// «Inserito» (49). <c>U_DestType</c> è alfanumerico su questo impianto: si confronta con la stringa
+        /// <c>'13'</c>, mai con un intero. <c>U_TimeNrNet</c> è testo su alcune righe: conversione difensiva
+        /// via <c>Convert.ToDecimal</c> sul valore grezzo, come il resto del servizio (non <c>GetDecimal</c>,
+        /// che fallirebbe sulle righe testuali).
+        /// </para>
+        /// </summary>
+        public async Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to)
+        {
+            var result = new List<TimesheetBillingState>();
+
+            try
+            {
+                using var connection = await CreateOpenConnectionAsync();
+
+                var query = $@"
+                    SELECT T.""Code"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
+                           H.""DocNum"", H.""DocDate""
+                    FROM ""{_schema}"".""@SGS_PRJ_OTMS"" T
+                    LEFT JOIN ""{_schema}"".""OINV"" H ON T.""U_DestType"" = '13' AND H.""DocEntry"" = T.""U_DestEntry""
+                    WHERE T.""Canceled"" = 'N' AND T.""U_Date"" >= ? AND T.""U_Date"" <= ?
+                    ORDER BY T.""Code""";
+
+                using var command = new OdbcCommand(query, connection);
+                command.Parameters.AddWithValue("@From", from.Date);
+                command.Parameters.AddWithValue("@To", to.Date);
+
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var status = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    var destType = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                    result.Add(new TimesheetBillingState
+                    {
+                        ErpDocId = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                        State = MapBillingState(status, destType),
+                        InvoiceErpDocNumber = reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
+                        InvoicedOn = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                        Hours = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving timesheet billing states for date range {From} to {To} from database", from, to);
+                throw;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Traduce <c>@SGS_PRJ_OTMS.U_Status</c> nel contratto ERP-neutro. «Fatturato» vince sempre, anche
+        /// senza <c>U_DestType</c> valorizzato: lo stato SAP è la fonte di verità, il documento di
+        /// destinazione è solo un arricchimento che può mancare senza far retrocedere la riga a bozza.
+        /// Qualunque stato non riconosciuto — incluso null — diventa "draft": è la lettura prudente quando
+        /// la provenienza non è chiara.
+        /// </summary>
+        internal static string MapBillingState(string? status, string? destType) => status switch
+        {
+            "Fatturato" => "invoiced",
+            "Confermato" => "confirmed",
+            "Inserito" => "draft",
+            _ => "draft",
+        };
+
         public async Task<IEnumerable<CustomerSummary>> GetCustomersAsync()
         {
             var customers = new List<CustomerSummary>();
