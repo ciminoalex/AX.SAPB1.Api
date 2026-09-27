@@ -40,6 +40,27 @@ namespace AX.SAPB1.Api.Controllers
         }
 
         /// <summary>
+        /// Stato del documento creato per una correlazione (Id del documento del portale): 200 sempre, con
+        /// <c>found = false</c> se non c'è (un 404 vorrebbe dire endpoint assente, cioè servizio non aggiornato).
+        /// Il portale la chiede prima di annullare un documento: finché qui è valido, non lo annulla.
+        /// </summary>
+        [HttpGet("by-correlation/{correlationId}")]
+        public async Task<ActionResult<SalesDocumentState>> GetState([FromRoute] string correlationId)
+        {
+            if (string.IsNullOrWhiteSpace(correlationId) || correlationId.Trim().Length > SalesDocumentPayloadBuilder.CorrelationIdMaxLength)
+                return BadRequest("correlationId non valido.");
+            try
+            {
+                return Ok(await _service.GetStateAsync(correlationId));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Errore nella lettura dello stato del documento {CorrelationId}", correlationId);
+                return StatusCode(500, ex.Message);
+            }
+        }
+
+        /// <summary>
         /// Anteprima per il collaudo: esegue le stesse verifiche del POST (validazione, campi utente, documento
         /// esistente, unità di misura) e restituisce il payload che verrebbe inviato al Service Layer, senza
         /// scrivere nulla in SAP.

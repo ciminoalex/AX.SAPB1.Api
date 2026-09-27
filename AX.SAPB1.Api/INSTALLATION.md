@@ -357,8 +357,8 @@ Layer però è per utente, non per company: un processo serve una company sola.
 - ragione sociale cambiata (`OADM.CompnyName`) così che nessuno la scambi per la produzione;
 - l'utente del Service Layer (`SapB1:UserName`) esiste nella copia e ha la licenza;
 - **cartella allegati**: la copia eredita `OADP.AttachPath` della produzione. Finché non punta a una cartella
-  dedicata (visibile al Service Layer, che su HANA gira su Linux) tenere `SapB1:SalesDocuments:Attachments:Enabled`
-  a `false`, altrimenti i PDF di test finirebbero nella cartella allegati di produzione.
+  dedicata (visibile al Service Layer, che su HANA gira su Linux) lasciare spento `SapB1:SalesDocuments:Attachments:Enabled`
+  (è il default: chiave assente = spento), altrimenti i PDF di test finirebbero nella cartella allegati di produzione.
 
 **Cartella e configurazione.** Es. `C:\Services\AX.SAPB1.Api.AxTest`, con l'exe e un `appsettings.json` proprio
 (`deploy.ps1` copia solo l'exe e non lo sovrascrive). Differenze rispetto alla produzione:
@@ -400,6 +400,10 @@ Layer però è per utente, non per company: un processo serve una company sola.
   Sull'istanza di produzione resta spento (chiave assente = spento): i metadati di `SBO_MTF` non si toccano.
 - `SalesDocuments:AllowPostedInvoices` abilita le fatture DEFINITIVE (irreversibili). Assente/false = solo bozze
   e ordini: il POST di una fattura definitiva risponde 403.
+- `SalesDocuments:Attachments:Enabled` abilita l'upload del PDF in `Attachments2`. È **opt-in** (assente/false =
+  spento: il documento nasce senza PDF e lo segnala in `attachmentError`): `true` solo sull'istanza di produzione, o
+  su una di test dopo aver dato alla copia una cartella allegati sua. Se SAP rifiuta un documento dopo l'upload, il
+  nuovo tentativo riusa la voce già caricata (stesso nome di file) invece di ricaricarla.
 - Chiavi `Jwt:Key` e `Auth:ApiKeys` distinte dalla produzione: una chiave di test non deve aprire la produzione.
 
 **Primo impianto** (PowerShell come amministratore sul server; `deploy.ps1` richiede che l'exe esista già):
@@ -424,4 +428,5 @@ un endpoint `Https` dedicato, oppure verificare a mano (`http://<server>:5012/sw
 3. `POST /api/sales-documents` bozza fattura → 201; stesso `correlationId` di nuovo → 200 con `alreadyExisted = true`, nessun doppione;
 4. fattura definitiva (con `AllowPostedInvoices`), ordine in bozza e definitivo, allegato (dopo aver sistemato `OADP.AttachPath`);
 5. `GET /api/invoices` e `GET /api/sales-orders` — correlazione, stato dell'ordine, fatture tratte (`INV1.BaseType = 17`);
-6. `POST /api/fiscal-projects` → codice `PRJ<yy>_<yy><progressivo>` successivo al massimo dell'anno.
+6. `POST /api/fiscal-projects` → codice `PRJ<yy>_<yy><progressivo>` successivo al massimo dell'anno di CREAZIONE (`codeYear` o oggi a Roma, mai l'anno di `validFrom`); la stessa richiesta con lo stesso `idempotencyKey` ripetuta → 200, stesso codice, `created = false`;
+7. `GET /api/sales-documents/by-correlation/{id}` → `found`, tipo, stato, `cancelled` del documento creato.

@@ -26,6 +26,32 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
 
         private static readonly SemaphoreSlim CreationLock = new(1, 1);
 
+        private static FiscalProjectIdempotency Idempotency => FiscalProjectIdempotency.Shared;
+
+        /// <summary>
+        /// Anno della numerazione del codice: quello indicato dal chiamante (1900-9999), altrimenti l'anno di oggi
+        /// a Roma. Non si usa validFrom: il portale lo retrodata apposta (un progetto nato nel 2024 creato oggi, o
+        /// qualunque creazione di gennaio, finirebbe nella serie di un anno chiuso, e un codice OPRJ non si rinomina).
+        /// </summary>
+        internal static int ResolveCodeYear(int? requested, DateTime utcNow)
+        {
+            if (requested is >= 1900 and <= 9999) return requested.Value;
+            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), Rome).Year;
+        }
+
+        private static readonly TimeZoneInfo Rome = ResolveRome();
+
+        private static TimeZoneInfo ResolveRome()
+        {
+            foreach (var id in new[] { "Europe/Rome", "W. Europe Standard Time" })
+            {
+                try { return TimeZoneInfo.FindSystemTimeZoneById(id); }
+                catch (TimeZoneNotFoundException) { }
+                catch (InvalidTimeZoneException) { }
+            }
+            return TimeZoneInfo.Utc;
+        }
+
         private readonly IDbOdbcService _db;
         private readonly ISapB1ServiceLayerService _sl;
         private readonly IConfiguration _configuration;
@@ -61,7 +87,9 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
             }
 
             var validFrom = (request.ValidFrom ?? DateTime.Today).Date;
-            var year = validFrom.Year;
+            // Anno della numerazione: quello chiesto o quello di oggi a Roma, MAI quello di validFrom (retrodatato).
+            var year = ResolveCodeYear(request.CodeYear, DateTime.UtcNow);
+            var idempotencyKey = string.IsNullOrWhiteSpace(request.IdempotencyKey) ? null : request.IdempotencyKey.Trim();
             var lengths = await _db.GetColumnLengthsAsync("OPRJ");
             var name = SalesDocumentPayloadBuilder.Truncate(request.Name.Trim(), SalesDocumentPayloadBuilder.LengthOf(lengths, "PrjName"))!;
 
@@ -81,6 +109,13 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
                     return Rejected(explicitCode, response);
                 }
 
+                // Stessa richiesta ripetuta dopo una risposta persa: il progetto creato la prima volta, non un altro.
+                if (Idempotency.TryGet(idempotencyKey, DateTime.UtcNow, out var known))
+                {
+                    _logger.LogInformation("Progetto contabile per la chiave {Key} già creato: {Code} (nessun doppione).", idempotencyKey, known);
+                    return new FiscalProjectOutcome(200, new FiscalProjectCreateResult { Code = known, Created = false });
+                }
+
                 for (var attempt = 1; attempt <= MaxAttempts; attempt++)
                 {
                     var existing = await _db.GetFiscalProjectCodesLikeAsync(pattern.LikePattern(year));
@@ -96,7 +131,10 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
 
                     var response = await _sl.CreateFinancialProjectAsync(BuildPayload(code, name, validFrom, request.ValidTo));
                     if (response.IsSuccess)
+                    {
+                        Idempotency.Remember(idempotencyKey, code, DateTime.UtcNow);
                         return Created(code, name);
+                    }
 
                     if (!ServiceLayerErrors.IsAlreadyExists(response.Body))
                         return Rejected(code, response);

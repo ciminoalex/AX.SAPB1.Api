@@ -151,6 +151,24 @@ namespace AX.SAPB1.Api.Models
         public string Canceled { get; set; } = "N";
     }
 
+    /// <summary>
+    /// Risposta di <c>GET /api/sales-documents/by-correlation/{correlationId}</c>: il documento creato per la
+    /// correlazione, se c'è, con tipo, stato e annullamento. Il portale la usa prima di annullare un documento:
+    /// finché qui è valido, liberare le sue ore nel portale produrrebbe un secondo documento.
+    /// </summary>
+    public class SalesDocumentState
+    {
+        /// <summary>False = nessun documento con quella correlazione (per esempio bozza eliminata in SAP).</summary>
+        public bool Found { get; set; }
+        public string? DocumentKind { get; set; }
+        public string? Status { get; set; }
+        public int? DocEntry { get; set; }
+        public int? DocNum { get; set; }
+
+        /// <summary>True se il documento scelto è annullato (<c>CANCELED</c> diverso da N).</summary>
+        public bool Cancelled { get; set; }
+    }
+
     // ── Progetto contabile (OPRJ) ──
 
     /// <summary>Richiesta di <c>POST /api/fiscal-projects</c>.</summary>
@@ -162,6 +180,19 @@ namespace AX.SAPB1.Api.Models
 
         /// <summary>Codice esplicito. Null ⇒ generato dal pattern <c>SapB1:FiscalProjectCodePattern</c>.</summary>
         public string? Code { get; set; }
+
+        /// <summary>
+        /// Anno della numerazione del codice generato. Null ⇒ l'anno di oggi a Roma. MAI l'anno di
+        /// <see cref="ValidFrom"/>: il portale retrodata la validità (documento di settembre generato a ottobre, progetti
+        /// iniziati anni fa, creazioni di gennaio), e il codice finirebbe nella serie di un anno chiuso.
+        /// </summary>
+        public int? CodeYear { get; set; }
+
+        /// <summary>
+        /// Chiave di idempotenza del chiamante (l'Id del progetto del portale): se la risposta si perde e la stessa
+        /// richiesta si ripete, si restituisce il progetto già creato (created = false) invece di crearne un secondo.
+        /// </summary>
+        public string? IdempotencyKey { get; set; }
     }
 
     public class FiscalProjectCreateResult

@@ -19,8 +19,11 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
     /// (400), perché il ripiego mascherava il controllo "articolo mancante" del portale;</item>
     /// <item>niente <c>LineTotal</c>: con ore frazionarie × tariffa SAP ricalcolava o arrotondava a modo suo.
     /// Si mandano quantità e prezzo, e i totali si rileggono dalla risposta;</item>
-    /// <item><c>DocDueDate</c> solo se valorizzata: il vecchio push la forzava alla data documento,
-    /// scavalcando le condizioni di pagamento del cliente;</item>
+    /// <item><c>DocDueDate</c> della fattura solo se valorizzata: il vecchio push la forzava alla data documento,
+    /// scavalcando le condizioni di pagamento del cliente. Sull'ordine invece è la data di consegna, obbligatoria
+    /// per SAP: se manca vale la data documento (<see cref="DueDateFor"/>);</item>
+    /// <item>unità di misura di riga subito dopo l'articolo, prima di quantità e prezzo: il cambio di UdM
+    /// rilegge il prezzo dal listino;</item>
     /// <item>sconto esplicitamente a zero su testata e righe: il prezzo lo decide il portale (tariffa già
     /// scontata). Senza, uno sconto di anagrafica del cliente cambierebbe in silenzio i totali in SAP.</item>
     /// </list>
@@ -171,7 +174,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             header["CardCode"] = request.CardCode!.Trim();
             header["DocDate"] = docDate;
             header["TaxDate"] = docDate;
-            Put(header, "DocDueDate", FormatDate(request.DueDate));
+            Put(header, "DocDueDate", FormatDate(DueDateFor(request, target)));
             Put(header, "Comments", Truncate(NullIfBlank(request.Comments), LengthOf(schema.HeaderLengths, "Comments")));
             Put(header, "Project", headerProject);
             Put(header, "NumAtCard", Truncate(orderNumber, LengthOf(schema.HeaderLengths, "NumAtCard")));
@@ -202,14 +205,18 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 {
                     ["ItemCode"] = l.ItemCode!.Trim(),
                 };
+                // Unità di misura SUBITO dopo l'articolo e PRIMA di quantità e prezzo. Il Service Layer applica le
+                // proprietà nell'ordine del JSON, e il cambio di UdM rilegge il prezzo dal listino di quell'unità:
+                // scritta dopo, su un articolo a gruppi UdM (le righe T&M a ore, "HH" su un articolo a giorni)
+                // sostituirebbe la tariffa del portale con quella di listino, in silenzio.
+                var uom = lineUoms != null && i < lineUoms.Count ? lineUoms[i] : default;
+                if (uom.UoMEntry.HasValue) line["UoMEntry"] = uom.UoMEntry.Value;
+                Put(line, "MeasureUnit", Truncate(uom.MeasureUnit, measureUnitLength));
+
                 Put(line, "ItemDescription", Truncate(NullIfBlank(l.Description), descriptionLength));
                 line["Quantity"] = l.Quantity;
                 line["UnitPrice"] = l.UnitPrice;
                 line["DiscountPercent"] = 0m;
-
-                var uom = lineUoms != null && i < lineUoms.Count ? lineUoms[i] : default;
-                if (uom.UoMEntry.HasValue) line["UoMEntry"] = uom.UoMEntry.Value;
-                Put(line, "MeasureUnit", Truncate(uom.MeasureUnit, measureUnitLength));
 
                 // Il progetto di riga è quello che arriva su JDT1 (ricavo per commessa). Via DI/Service Layer la
                 // testata non si propaga alle righe: una riga senza progetto eredita quello di testata.
@@ -222,6 +229,15 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             header["DocumentLines"] = lines;
             return header;
         }
+
+        /// <summary>
+        /// <c>DocDueDate</c> della testata. Fattura: solo se indicata, altrimenti SAP la calcola dalle condizioni
+        /// di pagamento del cliente. Ordine (definitivo o bozza): per SAP è la data di CONSEGNA ed è obbligatoria
+        /// — senza, il POST Orders viene rifiutato ("Delivery Date") —; se il portale non la indica vale la data
+        /// documento, come negli ordini creati dalle altre integrazioni MTF.
+        /// </summary>
+        public static DateTime? DueDateFor(SalesDocumentRequest request, SalesDocumentTarget target)
+            => request.DueDate ?? (target.DocumentKind == SalesDocumentKinds.Order ? request.DocDate : null);
 
         /// <summary>
         /// Decide come comunicare l'unità di misura di una riga. Gli articoli con gruppo UdM (UgpEntry ≠ -1)
@@ -345,6 +361,47 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             var suffix = new string(correlationId.Where(char.IsLetterOrDigit).Take(8).ToArray());
             return suffix.Length == 0 ? name + ext : $"{name}_{suffix}{ext}";
         }
+
+        /// <summary>
+        /// Voce di <c>Attachments2</c> già caricata per questo documento da un tentativo precedente, da riusare
+        /// invece di ricaricare. Il nome del file è deterministico (suffisso dal correlationId): se SAP ha
+        /// rifiutato il documento DOPO l'upload, il nuovo tentativo troverebbe il nome già presente e l'upload
+        /// fallirebbe, e il documento nascerebbe senza PDF. Si sceglie la voce più recente che contiene TUTTI i
+        /// file chiesti (nome ed estensione, senza distinzione di maiuscole); null se non ce n'è una.
+        /// </summary>
+        public static int? SelectReusableAttachmentEntry(IEnumerable<AttachmentFileRow> rows, IReadOnlyCollection<string> fileNames)
+        {
+            if (fileNames.Count == 0) return null;
+            var wanted = fileNames.Select(SplitFileName).ToList();
+            return rows
+                .GroupBy(r => r.AbsEntry)
+                .Where(g => wanted.All(w => g.Any(r =>
+                    string.Equals(r.FileName?.Trim(), w.Name, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals((r.FileExt ?? string.Empty).Trim().TrimStart('.'), w.Ext, StringComparison.OrdinalIgnoreCase))))
+                .Select(g => (int?)g.Key)
+                .OrderByDescending(k => k)
+                .FirstOrDefault();
+        }
+
+        /// <summary>Nome senza estensione ed estensione senza punto, come le salva ATC1.</summary>
+        public static (string Name, string Ext) SplitFileName(string fileName)
+        {
+            var dot = fileName.LastIndexOf('.');
+            return dot > 0 ? (fileName[..dot], fileName[(dot + 1)..]) : (fileName, string.Empty);
+        }
+
+        /// <summary>Stato per il portale del documento trovato per correlazione (null = nessun documento).</summary>
+        public static SalesDocumentState ToState(ExistingSalesDocument? existing) => existing == null
+            ? new SalesDocumentState { Found = false }
+            : new SalesDocumentState
+            {
+                Found = true,
+                DocumentKind = existing.DocumentKind,
+                Status = existing.Status,
+                DocEntry = existing.DocEntry,
+                DocNum = existing.DocNum,
+                Cancelled = !string.Equals(existing.Canceled, "N", StringComparison.OrdinalIgnoreCase),
+            };
 
         private static string ToSafeAscii(string value)
         {

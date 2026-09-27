@@ -353,6 +353,32 @@ namespace AX.SAPB1.Api.Services
             return count != null && count != DBNull.Value && Convert.ToInt32(count, CultureInfo.InvariantCulture) > 0;
         }
 
+        /// <summary>
+        /// Allegati (<c>ATC1</c>) con uno dei nomi di file indicati, senza estensione come li salva SAP. Sola
+        /// lettura: serve a riusare la voce caricata da un tentativo precedente dello stesso documento (vedi
+        /// <see cref="SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry"/>).
+        /// </summary>
+        public async Task<IReadOnlyList<AttachmentFileRow>> FindAttachmentsByFileNamesAsync(IReadOnlyCollection<string> fileNames)
+        {
+            if (fileNames.Count == 0) return Array.Empty<AttachmentFileRow>();
+            using var connection = await CreateOpenConnectionAsync();
+            using var command = new OdbcCommand(
+                $@"SELECT ""AbsEntry"", ""FileName"", ""FileExt"" FROM ""{_schema}"".""ATC1"" WHERE ""FileName"" IN ({Placeholders(fileNames.Count)})",
+                connection);
+            foreach (var name in fileNames) command.Parameters.AddWithValue("@FileName", name);
+
+            var rows = new List<AttachmentFileRow>();
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var entry = ReadNullableInt(reader, 0);
+                var fileName = ParseErpText(reader.IsDBNull(1) ? null : reader.GetValue(1));
+                if (entry == null || fileName == null) continue;
+                rows.Add(new AttachmentFileRow(entry.Value, fileName, ParseErpText(reader.IsDBNull(2) ? null : reader.GetValue(2))));
+            }
+            return rows;
+        }
+
         private static decimal? ReadNullableDecimal(System.Data.Common.DbDataReader reader, int ordinal)
         {
             if (reader.IsDBNull(ordinal)) return null;

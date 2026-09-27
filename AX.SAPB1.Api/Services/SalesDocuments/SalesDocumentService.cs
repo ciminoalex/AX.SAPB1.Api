@@ -13,6 +13,12 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
 
         /// <summary>Stesso percorso di <see cref="CreateAsync"/> fino al payload, senza scrivere nulla in SAP.</summary>
         Task<SalesDocumentPreview> PreviewAsync(SalesDocumentRequest request);
+
+        /// <summary>
+        /// Stato del documento creato per la correlazione (trovato, tipo, stato, annullato). Sola lettura: il
+        /// portale la chiede prima di annullare un proprio documento già in SAP.
+        /// </summary>
+        Task<SalesDocumentState> GetStateAsync(string correlationId);
     }
 
     /// <summary>
@@ -29,8 +35,9 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
     /// destinazione (o, per una bozza, su quella del tipo) il documento NON si crea: nascerebbe senza chiave,
     /// il primo retry lo duplicherebbe e il portale non lo aggancerebbe mai.</para>
     ///
-    /// <para><b>Allegati.</b> Caricati prima del documento; un errore dell'allegato non annulla il documento
-    /// e torna in <c>attachmentError</c>.</para>
+    /// <para><b>Allegati.</b> Opt-in (<c>SapB1:SalesDocuments:Attachments:Enabled</c>), caricati prima del documento;
+    /// un errore dell'allegato non annulla il documento e torna in <c>attachmentError</c>. Se SAP rifiuta il
+    /// documento dopo l'upload, il nuovo tentativo riusa la voce già caricata (stesso nome di file).</para>
     /// </summary>
     public sealed class SalesDocumentService : ISalesDocumentService
     {
@@ -64,11 +71,17 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             bool.TryParse(_configuration["SapB1:SalesDocuments:AllowPostedInvoices"], out var v) && v;
 
         /// <summary>
-        /// Allegati attivi salvo <c>false</c> esplicito. Da spegnere su una company copiata finché la sua
-        /// cartella allegati (OADP.AttachPath) punta ancora a quella di produzione.
+        /// Allegati: opt-in esplicito, chiave assente o non booleana ⇒ spenti, come gli altri interruttori di
+        /// scrittura (AllowPostedInvoices, Bootstrap). Una company copiata eredita OADP.AttachPath della
+        /// produzione: con il default acceso un'istanza di test configurata a metà scriverebbe i PDF nella cartella
+        /// allegati di produzione in silenzio, mentre con il default spento una produzione non configurata crea i
+        /// documenti senza PDF e lo dice in <c>attachmentError</c>. <c>true</c> va scritto solo sull'istanza di
+        /// produzione (o su una di test la cui cartella allegati è stata separata).
         /// </summary>
-        private bool AttachmentsEnabled =>
-            !bool.TryParse(_configuration["SapB1:SalesDocuments:Attachments:Enabled"], out var v) || v;
+        internal static bool AttachmentsEnabledIn(IConfiguration configuration) =>
+            bool.TryParse(configuration["SapB1:SalesDocuments:Attachments:Enabled"], out var v) && v;
+
+        private bool AttachmentsEnabled => AttachmentsEnabledIn(_configuration);
 
         public async Task<SalesDocumentOutcome> CreateAsync(SalesDocumentRequest request)
         {
@@ -171,6 +184,22 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             if (request.Attachments?.Count > 0 && !AttachmentsEnabled)
                 preview.Warnings.Add("Allegati disattivati da configurazione (SapB1:SalesDocuments:Attachments:Enabled=false).");
             return preview;
+        }
+
+        public async Task<SalesDocumentState> GetStateAsync(string correlationId)
+        {
+            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+            var tables = new List<string>();
+            foreach (var table in DbOdbcService.CorrelationLookupTables)
+                if ((await _db.GetUserFieldColumnsAsync(table)).Contains(udfInvId)) tables.Add(table);
+            // Nessuna tabella con il campo di correlazione: non si può dire "non c'è" (il portale libererebbe le
+            // ore di un documento forse esistente). Meglio un errore esplicito.
+            if (tables.Count == 0)
+                throw new InvalidOperationException($"Il campo utente {udfInvId} non esiste su nessuna tabella dei documenti di vendita: stato non verificabile.");
+
+            var existing = SalesDocumentPayloadBuilder.SelectExisting(
+                await _db.FindSalesDocumentsByCorrelationIdAsync(correlationId.Trim(), tables));
+            return SalesDocumentPayloadBuilder.ToState(existing);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -304,6 +333,25 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                     SalesDocumentPayloadBuilder.SanitizeAttachmentFileName(a!.FileName, correlationId),
                     string.IsNullOrWhiteSpace(a.ContentType) ? "application/pdf" : a.ContentType.Trim(),
                     bytes));
+            }
+
+            // Un tentativo precedente dello STESSO documento (rifiutato da SAP dopo l'upload) ha già caricato questi
+            // file con lo stesso nome: si riusa quella voce invece di ricaricare (il nome già presente farebbe fallire
+            // l'upload e il documento nascerebbe senza PDF). La ricerca è un'ottimizzazione: se fallisce, si carica.
+            try
+            {
+                var names = files.Select(f => SalesDocumentPayloadBuilder.SplitFileName(f.FileName).Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                var reusable = SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry(
+                    await _db.FindAttachmentsByFileNamesAsync(names), files.Select(f => f.FileName).ToList());
+                if (reusable != null)
+                {
+                    _logger.LogInformation("Allegati per {CorrelationId} già caricati da un tentativo precedente: riuso di Attachments2({Entry}).", correlationId, reusable);
+                    return (reusable, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Ricerca degli allegati già caricati per {CorrelationId} non riuscita: si caricano di nuovo.", correlationId);
             }
 
             try

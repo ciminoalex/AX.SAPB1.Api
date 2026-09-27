@@ -57,6 +57,9 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         public IReadOnlyDictionary<string, int> LineLengths { get; init; } = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>Riga di <c>ATC1</c> (allegati della company): voce di Attachments2, nome del file senza estensione, estensione.</summary>
+    public sealed record AttachmentFileRow(int AbsEntry, string FileName, string? FileExt);
+
     /// <summary>File da caricare in <c>Attachments2</c>.</summary>
     public sealed record ServiceLayerFile(string FileName, string ContentType, byte[] Content);
 

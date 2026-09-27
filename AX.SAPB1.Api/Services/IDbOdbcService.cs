@@ -73,6 +73,12 @@ namespace AX.SAPB1.Api.Services
 
         Task<bool> FiscalProjectExistsAsync(string code);
 
+        /// <summary>
+        /// Righe di ATC1 (allegati) con uno dei nomi di file indicati (senza estensione): servono a riusare la voce
+        /// di Attachments2 caricata da un tentativo precedente dello stesso documento.
+        /// </summary>
+        Task<IReadOnlyList<SalesDocuments.AttachmentFileRow>> FindAttachmentsByFileNamesAsync(IReadOnlyCollection<string> fileNames);
+
         // ── Contabilità generale (lettura) ────────────────────────────────────
         // Nota: distinta da GetLedgerAsync, che è il PARTITARIO CLIENTI (scadenzario/esposizione).
         // Questi metodi leggono il conto economico riga per riga: sono cose diverse, il nome inganna.

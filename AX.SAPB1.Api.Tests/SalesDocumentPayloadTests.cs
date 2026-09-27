@@ -1,6 +1,7 @@
 using AX.SAPB1.Api.Models;
 using AX.SAPB1.Api.Services;
 using AX.SAPB1.Api.Services.SalesDocuments;
+using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using Xunit;
 
@@ -183,6 +184,111 @@ public class SalesDocumentPayloadTests
         r.DueDate = new DateTime(2026, 10, 30);
         var p2 = SalesDocumentPayloadBuilder.Build(r, SalesDocumentPayloadBuilder.ResolveTarget("invoice", "draft")!, SchemaConTuttiGliUdf());
         Assert.Equal("2026-10-30", p2["DocDueDate"]);
+    }
+
+    /// <summary>
+    /// Sull'ordine DocDueDate è la data di CONSEGNA, obbligatoria per SAP: senza, il POST Orders viene rifiutato.
+    /// Il portale non la manda, quindi vale la data documento (anche per la bozza d'ordine, che si conferma dopo).
+    /// </summary>
+    [Theory]
+    [InlineData("posted")]
+    [InlineData("draft")]
+    public void Ordine_senza_scadenza_manda_la_consegna_alla_data_documento(string posting)
+    {
+        var target = SalesDocumentPayloadBuilder.ResolveTarget("order", posting)!;
+        var p = SalesDocumentPayloadBuilder.Build(Richiesta("order", posting), target, SchemaConTuttiGliUdf());
+        Assert.Equal("2026-09-30", p["DocDueDate"]);
+
+        var r = Richiesta("order", posting);
+        r.DueDate = new DateTime(2026, 11, 15);
+        Assert.Equal("2026-11-15", SalesDocumentPayloadBuilder.Build(r, target, SchemaConTuttiGliUdf())["DocDueDate"]);
+    }
+
+    /// <summary>
+    /// Il Service Layer applica le proprietà nell'ordine del JSON e il cambio di UdM rilegge il prezzo dal
+    /// listino: UoMEntry scritto DOPO UnitPrice sostituirebbe la tariffa del portale con quella di listino.
+    /// </summary>
+    [Fact]
+    public void L_unita_di_misura_viene_prima_di_quantita_e_prezzo_nel_json()
+    {
+        var target = SalesDocumentPayloadBuilder.ResolveTarget("invoice", "posted")!;
+        var p = SalesDocumentPayloadBuilder.Build(Richiesta(), target, SchemaConTuttiGliUdf(), new[] { new LineUom(2, null) });
+
+        var keys = Righe(p)[0].Keys.ToList();
+        Assert.Equal(new[] { "ItemCode", "UoMEntry" }, keys.Take(2));
+        Assert.True(keys.IndexOf("UoMEntry") < keys.IndexOf("Quantity"));
+        Assert.True(keys.IndexOf("UoMEntry") < keys.IndexOf("UnitPrice"));
+        Assert.True(keys.IndexOf("UoMEntry") < keys.IndexOf("DiscountPercent"));
+
+        var json = JsonConvert.SerializeObject(p);
+        Assert.True(json.IndexOf("\"UoMEntry\"", StringComparison.Ordinal) < json.IndexOf("\"UnitPrice\"", StringComparison.Ordinal));
+
+        var manual = SalesDocumentPayloadBuilder.Build(Richiesta(), target, SchemaConTuttiGliUdf(), new[] { new LineUom(null, "HH") });
+        Assert.Equal(new[] { "ItemCode", "MeasureUnit" }, Righe(manual)[0].Keys.Take(2));
+    }
+
+    // ── Allegati ──
+
+    [Fact]
+    public void Al_nuovo_tentativo_si_riusa_la_voce_con_tutti_i_file_del_documento()
+    {
+        var file = SalesDocumentPayloadBuilder.SanitizeAttachmentFileName("Comal - Attivita settembre 2026.pdf", CorrelationId);
+        var (name, _) = SalesDocumentPayloadBuilder.SplitFileName(file);
+        var rows = new[]
+        {
+            new AttachmentFileRow(7400, name, "pdf"),
+            new AttachmentFileRow(7410, name, "PDF"),
+            new AttachmentFileRow(7420, name, "docx"),
+            new AttachmentFileRow(7430, "Altro documento_0b7c5d1e", "pdf"),
+        };
+
+        Assert.Equal(7410, SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry(rows, new[] { file }));
+        Assert.Null(SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry(rows.Skip(2), new[] { file }));
+        Assert.Null(SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry(rows, Array.Empty<string>()));
+        // Due file: serve una voce che li contenga entrambi.
+        Assert.Null(SalesDocumentPayloadBuilder.SelectReusableAttachmentEntry(rows, new[] { file, "Altro documento_0b7c5d1e.pdf" }));
+    }
+
+    [Fact]
+    public void Gli_allegati_sono_opt_in()
+    {
+        static bool Enabled(string? value)
+        {
+            var values = new Dictionary<string, string?>();
+            if (value != null) values["SapB1:SalesDocuments:Attachments:Enabled"] = value;
+            return SalesDocumentService.AttachmentsEnabledIn(new ConfigurationBuilder()
+                .AddInMemoryCollection(values).Build());
+        }
+
+        Assert.False(Enabled(null));
+        Assert.False(Enabled(""));
+        Assert.False(Enabled("si"));
+        Assert.False(Enabled("false"));
+        Assert.True(Enabled("true"));
+        Assert.True(Enabled("True"));
+    }
+
+    // ── Stato per correlazione ──
+
+    [Fact]
+    public void Lo_stato_dice_se_il_documento_c_e_ed_e_annullato()
+    {
+        Assert.False(SalesDocumentPayloadBuilder.ToState(null).Found);
+
+        var valid = SalesDocumentPayloadBuilder.ToState(new ExistingSalesDocument
+        {
+            Table = "OINV", DocumentKind = "invoice", Status = "posted", DocEntry = 12, DocNum = 2610500, Canceled = "N",
+        });
+        Assert.True(valid.Found);
+        Assert.False(valid.Cancelled);
+        Assert.Equal((12, 2610500), (valid.DocEntry!.Value, valid.DocNum!.Value));
+
+        var cancelled = SalesDocumentPayloadBuilder.ToState(new ExistingSalesDocument
+        {
+            Table = "ORDR", DocumentKind = "order", Status = "posted", DocEntry = 13, Canceled = "Y",
+        });
+        Assert.True(cancelled.Found);
+        Assert.True(cancelled.Cancelled);
     }
 
     [Fact]
