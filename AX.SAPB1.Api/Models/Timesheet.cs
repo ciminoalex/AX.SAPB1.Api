@@ -47,7 +47,20 @@ namespace AX.SAPB1.Api.Models
         
         // Campi articolo e stato
         public string? Status { get; set; } // Stato (Alfanumerico 100)
-        
+
+        /// <summary>
+        /// Colonna di sistema <c>Canceled</c> della riga (JSON <c>canceled</c>): <c>true</c> = riga annullata in SAP
+        /// (<c>'Y'</c>), <c>false</c> = attiva (<c>'N'</c>), <c>null</c> = non letta o illeggibile. Campo AGGIUNTO in
+        /// coda al contratto (additivo: chi non lo legge non cambia).
+        /// <para>
+        /// Oggi lo valorizza solo <c>GET /api/timesheet/employee/{employeeId}/daterange</c>, la ricerca che il portale
+        /// usa per ritrovare una riga dopo un push andato in timeout: quella query restituisce ANCHE le righe annullate
+        /// (serve ad altri chiamanti, non si filtra), e senza questo campo una riga annullata con gli stessi attributi
+        /// sembrerebbe la riga creata dal push. Le altre letture di timesheet lo lasciano a <c>null</c>: lì vuol dire
+        /// "non letto", non "attiva".
+        /// </para>
+        /// </summary>
+        public bool? Canceled { get; set; }
     }
 
     public class TimesheetCreateRequest
@@ -120,6 +133,16 @@ namespace AX.SAPB1.Api.Models
         public decimal? Hours { get; set; }
         [Required]
         public string? Desc { get; set; }
+
+        /// <summary>
+        /// Ore fatturabili della riga (facoltativo). SGS fattura il T&amp;M da <c>U_TimeNrNet</c>, non dalle ore
+        /// lorde: se il capo progetto riduce nel portale le ore da fatturare, il valore ridotto deve finire lì,
+        /// altrimenti SGS fattura comunque le ore piene. Assente o <c>null</c> = uguale a <see cref="Hours"/>
+        /// (comportamento di prima, i chiamanti che non lo mandano non cambiano). Vincolo
+        /// <c>0 &lt;= BillableHours &lt;= Hours</c>, altrimenti 400. Scritto come <c>U_TimeNrTot = Hours</c>,
+        /// <c>U_TimeNrNet = BillableHours</c>, <c>U_TimeNrNF = Hours - BillableHours</c>.
+        /// </summary>
+        public decimal? BillableHours { get; set; }
     }
 
     public class TimesheetServiceLayerPayload
@@ -231,7 +254,14 @@ namespace AX.SAPB1.Api.Models
         public string State { get; set; } = string.Empty;      // "invoiced" | "confirmed" | "draft"
         public string? InvoiceErpDocNumber { get; set; }       // OINV.DocNum
         public DateTime? InvoicedOn { get; set; }               // OINV.DocDate
-        public decimal Hours { get; set; }                     // U_TimeNrNet
+        public decimal Hours { get; set; }                     // U_TimeNrNet (ore fatturabili: quelle che SGS fattura)
+
+        // U_TimeNrTot, le ore lorde della riga. Campo AGGIUNTO in coda al contratto (additivo: chi non lo
+        // legge non cambia): serve al portale per il merge a tre vie delle ore già spinte, dove "loro" è
+        // la coppia (lorde, fatturabili) come la vede SAP. A differenza di Hours (contratto esistente, che
+        // resta a zero) un valore assente o illeggibile vale null: il portale tratta null come "il servizio
+        // non lo sa" e non confronta, mentre uno zero inventato sembrerebbe uno scostamento di ore.
+        public decimal? TotalHours { get; set; }
 
         // Chiave di riserva per l'abbinamento per attributi (vedi doc di classe): U_ResId, il codice
         // persona SAP (es. "Dip_41_MioNoe").

@@ -1,5 +1,7 @@
 using AX.SAPB1.Api.Authentication;
 using AX.SAPB1.Api.Services;
+using AX.SAPB1.Api.Services.FiscalProjects;
+using AX.SAPB1.Api.Services.SalesDocuments;
 using AX.SAPB1.Api.Support;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
@@ -86,7 +88,12 @@ builder.Services.AddCors(options =>
 builder.Services.AddScoped<IDbOdbcService, DbOdbcService>();
 builder.Services.AddSingleton<ICredentialStore, InMemoryCredentialStore>();
 
-// Provisioning all'avvio dei campi utente AX.360 sui documenti di marketing SAP B1.
+// Documenti di vendita (fattura/ordine, bozza/definitivo) e progetti contabili spinti dal portale AX.360.
+builder.Services.AddScoped<ISalesDocumentService, SalesDocumentService>();
+builder.Services.AddScoped<IFiscalProjectService, FiscalProjectService>();
+
+// Provisioning all'avvio dei campi utente AX.360 sui documenti di marketing SAP B1
+// (opt-in: SapB1:Bootstrap:UserFields:Enabled, vedi Ax360UserFieldsBootstrapService).
 builder.Services.AddHostedService<Ax360UserFieldsBootstrapService>();
 
 // HttpClient for SAP B1 auth probing (login validation)

@@ -18,6 +18,13 @@ namespace AX.SAPB1.Api.Services
         /// </summary>
         Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to);
 
+        /// <summary>
+        /// Stato corrente (annullo, fatturazione, ore lorde e fatturabili) di una riga di timesheet per
+        /// <c>DocEntry</c>, per decidere se <c>PATCH /api/timesheet/{docEntry}/hours</c> può scrivere. Null se
+        /// la riga non esiste. Sola lettura.
+        /// </summary>
+        Task<TimesheetHoursState?> GetTimesheetHoursStateAsync(int docEntry);
+
         // Lookups
         Task<IEnumerable<CustomerSummary>> GetCustomersAsync();
 
@@ -43,6 +50,41 @@ namespace AX.SAPB1.Api.Services
         /// AX.360 indicato nell'UDF di correlazione. Usato per evitare doppioni in fase di push.
         /// </summary>
         Task<ExistingErpDocument?> FindDocumentByCorrelationIdAsync(string ax360InvoiceId);
+
+        // ── Documenti di vendita dal portale (fattura/ordine, bozza/definitivo) ──
+
+        /// <summary>
+        /// Documenti di vendita (OINV, ORDR o bozze ODRF di tipo 13/17) già marcati con il correlationId in
+        /// <c>U_AX360_InvId</c>, cercati solo nelle <paramref name="tables"/> che hanno il campo, in ordine
+        /// deterministico. La scelta fra più candidati è di SalesDocumentPayloadBuilder.SelectExisting.
+        /// </summary>
+        Task<IReadOnlyList<ExistingSalesDocument>> FindSalesDocumentsByCorrelationIdAsync(string correlationId, IReadOnlyCollection<string> tables);
+
+        /// <summary>Colonne della tabella con la lunghezza massima (SYS.TABLE_COLUMNS). Vuoto se non leggibile.</summary>
+        Task<IReadOnlyDictionary<string, int>> GetColumnLengthsAsync(string table, bool forceRefresh = false);
+
+        /// <summary>Campi utente (nome fisico U_…) presenti sulla tabella: SYS.TABLE_COLUMNS ∪ CUFD. Lancia se nessuna fonte è leggibile.</summary>
+        Task<IReadOnlySet<string>> GetUserFieldColumnsAsync(string table, bool forceRefresh = false);
+
+        /// <summary>Unità di misura (OUOM) e gruppi UdM degli articoli (OITM/UGP1) per le righe di un documento.</summary>
+        Task<SalesDocuments.UomResolution> ResolveUnitsOfMeasureAsync(IReadOnlyCollection<string> itemCodes, IReadOnlyCollection<string> uomCodes);
+
+        /// <summary>Ordini cliente correlati al portale (U_AX360_InvId valorizzato), con stato, residuo e fatture tratte.</summary>
+        Task<IEnumerable<ErpSalesOrderDto>> GetSalesOrdersAsync(DateTime? since);
+
+        /// <summary>Articoli (OITM); con <paramref name="sellableOnly"/> solo quelli di vendita attivi.</summary>
+        Task<IEnumerable<ErpItemDto>> GetSellableItemsAsync(bool sellableOnly);
+
+        /// <summary>Codici dei progetti contabili (OPRJ) che rispondono al pattern LIKE (ESCAPE '\').</summary>
+        Task<IReadOnlyList<string>> GetFiscalProjectCodesLikeAsync(string likePattern);
+
+        Task<bool> FiscalProjectExistsAsync(string code);
+
+        /// <summary>
+        /// Righe di ATC1 (allegati) con uno dei nomi di file indicati (senza estensione): servono a riusare la voce
+        /// di Attachments2 caricata da un tentativo precedente dello stesso documento.
+        /// </summary>
+        Task<IReadOnlyList<SalesDocuments.AttachmentFileRow>> FindAttachmentsByFileNamesAsync(IReadOnlyCollection<string> fileNames);
 
         // ── Contabilità generale (lettura) ────────────────────────────────────
         // Nota: distinta da GetLedgerAsync, che è il PARTITARIO CLIENTI (scadenzario/esposizione).

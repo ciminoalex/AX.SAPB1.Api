@@ -124,5 +124,76 @@ DELETE {{baseUrl}}/api/timesheet/123
 
 ###
 
+### ── Fatturazione dal portale AX.360 (istanza di test: header X-Api-Key di test) ──
+
+### 9. Articoli di vendita attivi
+GET {{baseUrl}}/api/lookup/items?sellableOnly=true
+X-Api-Key: {{apiKey}}
+
+###
+
+### 10. Anteprima del documento (nessuna scrittura in SAP)
+POST {{baseUrl}}/api/sales-documents/preview
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "correlationId": "00000000-0000-0000-0000-000000000001",
+  "portalNumber": "FT-TEST-0001",
+  "documentKind": "invoice",
+  "posting": "draft",
+  "cardCode": "IT00387",
+  "docDate": "2026-09-30",
+  "comments": "Attività svolte dal 01-09-2026 al 30-09-2026",
+  "projectCode": "25PRJ_2500040",
+  "customerReference": { "orderNumber": "AD250169", "orderDate": "2026-08-01", "cig": null, "cup": null },
+  "lines": [
+    { "itemCode": "ATT_MTF_CONSULENZA", "description": "Consulenza funzionale – E. Pasquariello – dal 01/09/2026 al 26/09/2026",
+      "quantity": 4.25, "unitPrice": 75.0, "unitOfMeasureCode": "HH", "projectCode": "25PRJ_2500040",
+      "costingCode2": "PAS", "costingCode3": "CONS" }
+  ]
+}
+
+###
+
+### 11. Bozza di fattura (ripeterla: 200 con alreadyExisted = true, nessun doppione)
+POST {{baseUrl}}/api/sales-documents
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "correlationId": "00000000-0000-0000-0000-000000000001",
+  "portalNumber": "FT-TEST-0001",
+  "documentKind": "invoice",
+  "posting": "draft",
+  "cardCode": "IT00387",
+  "docDate": "2026-09-30",
+  "comments": "Attività svolte dal 01-09-2026 al 30-09-2026",
+  "projectCode": "25PRJ_2500040",
+  "lines": [
+    { "itemCode": "ATT_MTF_CONSULENZA", "description": "Consulenza funzionale – E. Pasquariello – dal 01/09/2026 al 26/09/2026",
+      "quantity": 4.25, "unitPrice": 75.0, "unitOfMeasureCode": "HH", "projectCode": "25PRJ_2500040",
+      "costingCode2": "PAS", "costingCode3": "CONS" }
+  ]
+}
+
+###
+
+### 12. Ordini cliente correlati al portale
+GET {{baseUrl}}/api/sales-orders?since=2026-09-01
+X-Api-Key: {{apiKey}}
+
+###
+
+### 13. Nuovo progetto contabile (codice dal pattern SapB1:FiscalProjectCodePattern)
+POST {{baseUrl}}/api/fiscal-projects
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{ "name": "Progetto di collaudo fatturazione", "validFrom": "2026-10-01", "validTo": null, "code": null }
+
+###
+
 ### Variabili di ambiente
 @baseUrl = https://localhost:7001
+@apiKey = CHANGE_ME_TEST_API_KEY
