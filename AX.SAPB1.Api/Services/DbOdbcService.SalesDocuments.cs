@@ -23,6 +23,10 @@ namespace AX.SAPB1.Api.Services
         /// Possono essere più d'uno (bozza confermata, fattura tratta da un ordine che ne eredita l'UDF,
         /// documento annullato e suo annullamento): li si restituisce tutti, con un ORDER BY deterministico, e
         /// sceglie il chiamante con <see cref="SalesDocumentPayloadBuilder.SelectExisting"/>.
+        /// <para>Una bozza già trasformata nel definitivo (<c>ODRF.DocStatus = 'C'</c>) resta in ODRF con
+        /// <c>CANCELED = 'N'</c>: la si restituisce marcata (<see cref="ExistingSalesDocument.ConvertedDraft"/>) e in
+        /// fondo, dopo anche i documenti annullati. Prima vinceva lei su un definitivo annullato in SAP, e il
+        /// portale vedeva «bozza valida» un documento che non esiste più.</para>
         /// </summary>
         public async Task<IReadOnlyList<ExistingSalesDocument>> FindSalesDocumentsByCorrelationIdAsync(string correlationId, IReadOnlyCollection<string> tables)
         {
@@ -30,23 +34,27 @@ namespace AX.SAPB1.Api.Services
             var udf = Ax360Udf.Col(Ax360Udf.InvId);
 
             const string columns = @"""DocEntry"", ""DocNum"", ""DocTotal"", ""VatSum"", ""DocDueDate"", ""CANCELED""";
+            const string notConverted = @"CAST('N' AS NVARCHAR(1)) AS ""Converted""";
             var parts = new List<string>();
             if (tables.Contains("OINV", StringComparer.OrdinalIgnoreCase))
-                parts.Add($@"SELECT CAST('OINV' AS NVARCHAR(4)) AS ""Src"", {columns}, CAST('invoice' AS NVARCHAR(10)) AS ""Kind"", CAST('posted' AS NVARCHAR(10)) AS ""Status""
+                parts.Add($@"SELECT CAST('OINV' AS NVARCHAR(4)) AS ""Src"", {columns}, CAST('invoice' AS NVARCHAR(10)) AS ""Kind"", CAST('posted' AS NVARCHAR(10)) AS ""Status"", {notConverted}
                     FROM ""{_schema}"".""OINV"" WHERE ""{udf}"" = ?");
             if (tables.Contains("ORDR", StringComparer.OrdinalIgnoreCase))
-                parts.Add($@"SELECT CAST('ORDR' AS NVARCHAR(4)) AS ""Src"", {columns}, CAST('order' AS NVARCHAR(10)) AS ""Kind"", CAST('posted' AS NVARCHAR(10)) AS ""Status""
+                parts.Add($@"SELECT CAST('ORDR' AS NVARCHAR(4)) AS ""Src"", {columns}, CAST('order' AS NVARCHAR(10)) AS ""Kind"", CAST('posted' AS NVARCHAR(10)) AS ""Status"", {notConverted}
                     FROM ""{_schema}"".""ORDR"" WHERE ""{udf}"" = ?");
             if (tables.Contains("ODRF", StringComparer.OrdinalIgnoreCase))
                 parts.Add($@"SELECT CAST('ODRF' AS NVARCHAR(4)) AS ""Src"", {columns},
-                        CAST(CASE ""ObjType"" WHEN '17' THEN 'order' ELSE 'invoice' END AS NVARCHAR(10)) AS ""Kind"", CAST('draft' AS NVARCHAR(10)) AS ""Status""
+                        CAST(CASE ""ObjType"" WHEN '17' THEN 'order' ELSE 'invoice' END AS NVARCHAR(10)) AS ""Kind"", CAST('draft' AS NVARCHAR(10)) AS ""Status"",
+                        CAST(CASE ""DocStatus"" WHEN 'C' THEN 'Y' ELSE 'N' END AS NVARCHAR(1)) AS ""Converted""
                     FROM ""{_schema}"".""ODRF"" WHERE ""{udf}"" = ? AND ""ObjType"" IN ('13', '17')");
             if (parts.Count == 0) return Array.Empty<ExistingSalesDocument>();
 
+            // Colonna nuova in coda (ordinale 9): gli ordinali letti sotto non si spostano.
             var query = $@"
-                SELECT X.""Src"", X.""DocEntry"", X.""DocNum"", X.""DocTotal"", X.""VatSum"", X.""DocDueDate"", X.""CANCELED"", X.""Kind"", X.""Status""
+                SELECT X.""Src"", X.""DocEntry"", X.""DocNum"", X.""DocTotal"", X.""VatSum"", X.""DocDueDate"", X.""CANCELED"", X.""Kind"", X.""Status"", X.""Converted""
                 FROM ({string.Join("\n UNION ALL \n", parts)}) X
-                ORDER BY CASE X.""CANCELED"" WHEN 'N' THEN 0 WHEN 'Y' THEN 1 ELSE 2 END,
+                ORDER BY CASE X.""Converted"" WHEN 'Y' THEN 1 ELSE 0 END,
+                         CASE X.""CANCELED"" WHEN 'N' THEN 0 WHEN 'Y' THEN 1 ELSE 2 END,
                          CASE X.""Status"" WHEN 'posted' THEN 0 ELSE 1 END,
                          X.""DocEntry"", X.""Kind""";
 
@@ -72,6 +80,7 @@ namespace AX.SAPB1.Api.Services
                         Canceled = ParseErpText(reader.IsDBNull(6) ? null : reader.GetValue(6)) ?? "N",
                         DocumentKind = ParseErpText(reader.GetValue(7)) ?? SalesDocumentKinds.Invoice,
                         Status = ParseErpText(reader.GetValue(8)) ?? SalesDocumentKinds.Draft,
+                        ConvertedDraft = string.Equals(ParseErpText(reader.IsDBNull(9) ? null : reader.GetValue(9)), "Y", StringComparison.OrdinalIgnoreCase),
                     });
                 }
                 return found;

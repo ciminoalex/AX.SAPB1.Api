@@ -42,16 +42,18 @@ namespace AX.SAPB1.Api.Controllers
         /// <summary>
         /// Stato del documento creato per una correlazione (Id del documento del portale): 200 sempre, con
         /// <c>found = false</c> se non c'è (un 404 vorrebbe dire endpoint assente, cioè servizio non aggiornato).
-        /// Il portale la chiede prima di annullare un documento: finché qui è valido, non lo annulla.
+        /// Il portale la chiede prima di annullare un documento: finché qui è valido, non lo annulla. Una creazione
+        /// in corso per la stessa correlazione si attende; dopo una creazione con esito incerto risponde 500 (stato
+        /// non verificabile) invece di «non trovato».
         /// </summary>
         [HttpGet("by-correlation/{correlationId}")]
-        public async Task<ActionResult<SalesDocumentState>> GetState([FromRoute] string correlationId)
+        public async Task<ActionResult<SalesDocumentState>> GetState([FromRoute] string correlationId, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(correlationId) || correlationId.Trim().Length > SalesDocumentPayloadBuilder.CorrelationIdMaxLength)
                 return BadRequest("correlationId non valido.");
             try
             {
-                return Ok(await _service.GetStateAsync(correlationId));
+                return Ok(await _service.GetStateAsync(correlationId, cancellationToken));
             }
             catch (Exception ex)
             {

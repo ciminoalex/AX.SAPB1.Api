@@ -149,6 +149,15 @@ namespace AX.SAPB1.Api.Models
 
         /// <summary><c>CANCELED</c> di SAP: 'N' valido, 'Y' annullato, 'C' documento di annullamento.</summary>
         public string Canceled { get; set; } = "N";
+
+        /// <summary>
+        /// Bozza già trasformata nel documento definitivo (<c>ODRF.DocStatus = 'C'</c>). SAP la conserva in ODRF
+        /// con <c>CANCELED = 'N'</c> accanto al definitivo, che ne eredita l'UDF di correlazione: non è un documento
+        /// vivo (non si elimina né si annulla) e non deve prevalere sul definitivo, nemmeno quando questo è
+        /// annullato. Misurato su SBO_MTF il 27/09/2026: 164 bozze di fattura e 2 d'ordine chiuse così, ognuna col
+        /// definitivo collegato da <c>draftKey</c>.
+        /// </summary>
+        public bool ConvertedDraft { get; set; }
     }
 
     /// <summary>

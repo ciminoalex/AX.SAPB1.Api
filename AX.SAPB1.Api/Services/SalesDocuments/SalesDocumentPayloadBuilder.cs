@@ -323,10 +323,15 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// dell'ordine deve ritrovare l'ORDINE, non la fattura nata da lui.</para>
         /// <para>Un documento annullato conta comunque come esistente: per rifatturare dopo un annullamento il
         /// portale deve emettere un documento nuovo (nuovo Id), mai riusare la stessa chiave.</para>
+        /// <para>Una bozza già trasformata nel definitivo (<see cref="ExistingSalesDocument.ConvertedDraft"/>) viene
+        /// dopo TUTTI gli altri, anche dopo gli annullati: ha <c>CANCELED = 'N'</c> ma non è un documento vivo. Col
+        /// vecchio ordine, bozza → definitivo → annullato in SAP restituiva «bozza valida», e il portale rifiutava
+        /// per sempre l'annullo («elimina la bozza nell'ERP»: una bozza chiusa non si elimina).</para>
         /// </summary>
         public static ExistingSalesDocument? SelectExisting(IEnumerable<ExistingSalesDocument> candidates, string? preferredKind = null)
             => candidates
-                .OrderBy(d => d.Canceled switch { "N" => 0, "Y" => 1, _ => 2 })
+                .OrderBy(d => d.ConvertedDraft ? 1 : 0)
+                .ThenBy(d => d.Canceled switch { "N" => 0, "Y" => 1, _ => 2 })
                 .ThenBy(d => preferredKind != null && d.DocumentKind == preferredKind ? 0 : 1)
                 .ThenBy(d => d.Status == SalesDocumentKinds.Posted ? 0 : 1)
                 .ThenBy(d => d.DocEntry)
@@ -390,10 +395,25 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             return dot > 0 ? (fileName[..dot], fileName[(dot + 1)..]) : (fileName, string.Empty);
         }
 
-        /// <summary>Stato per il portale del documento trovato per correlazione (null = nessun documento).</summary>
-        public static SalesDocumentState ToState(ExistingSalesDocument? existing) => existing == null
-            ? new SalesDocumentState { Found = false }
-            : new SalesDocumentState
+        /// <summary>
+        /// Stato per il portale del documento trovato per correlazione (null = nessun documento).
+        /// <para>Se il solo candidato è una bozza già trasformata (il definitivo nato da lei non porta la
+        /// correlazione: UDF non propagato), il definitivo esiste di sicuro ma non se ne conosce lo stato: lo si
+        /// dichiara «definitivo, non annullato», senza i numeri della bozza, così il portale non libera le ore di un
+        /// documento forse ancora valido. È il lato sicuro: al peggio l'utente verifica in SAP.</para>
+        /// </summary>
+        public static SalesDocumentState ToState(ExistingSalesDocument? existing)
+        {
+            if (existing == null) return new SalesDocumentState { Found = false };
+            if (existing.ConvertedDraft)
+                return new SalesDocumentState
+                {
+                    Found = true,
+                    DocumentKind = existing.DocumentKind,
+                    Status = SalesDocumentKinds.Posted,
+                    Cancelled = false,
+                };
+            return new SalesDocumentState
             {
                 Found = true,
                 DocumentKind = existing.DocumentKind,
@@ -402,6 +422,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 DocNum = existing.DocNum,
                 Cancelled = !string.Equals(existing.Canceled, "N", StringComparison.OrdinalIgnoreCase),
             };
+        }
 
         private static string ToSafeAscii(string value)
         {

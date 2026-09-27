@@ -16,9 +16,10 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
 
         /// <summary>
         /// Stato del documento creato per la correlazione (trovato, tipo, stato, annullato). Sola lettura: il
-        /// portale la chiede prima di annullare un proprio documento già in SAP.
+        /// portale la chiede prima di annullare un proprio documento già in SAP. Attende una creazione in corso
+        /// per la stessa correlazione; lancia se lo stato non è verificabile.
         /// </summary>
-        Task<SalesDocumentState> GetStateAsync(string correlationId);
+        Task<SalesDocumentState> GetStateAsync(string correlationId, CancellationToken cancellationToken = default);
     }
 
     /// <summary>
@@ -113,7 +114,19 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 var (attachmentEntry, attachmentError) = await UploadAttachmentsAsync(request, correlationId);
 
                 var payload = SalesDocumentPayloadBuilder.Build(request, target, prepared.Schema!, prepared.LineUoms, attachmentEntry);
-                var response = await _sl.CreateSalesDocumentAsync(target.Entity, payload);
+                ServiceLayerResponse response;
+                try
+                {
+                    response = await _sl.CreateSalesDocumentAsync(target.Entity, payload);
+                }
+                catch (Exception ex)
+                {
+                    // Timeout o errore di trasporto: la scrittura può arrivare in SAP dopo che qui si è smesso di
+                    // aspettare. Per un po' la lettura dello stato non dirà «non c'è» (vedi UncertainCreations).
+                    UncertainCreations.Shared.Mark(correlationId, DateTime.UtcNow);
+                    _logger.LogError(ex, "Creazione {Entity} per {CorrelationId}: esito incerto (nessuna risposta dal Service Layer).", target.Entity, correlationId);
+                    throw;
+                }
                 if (!response.IsSuccess)
                 {
                     var message = ServiceLayerErrors.ExtractMessage(response.Body);
@@ -186,20 +199,37 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             return preview;
         }
 
-        public async Task<SalesDocumentState> GetStateAsync(string correlationId)
+        /// <summary>
+        /// <para><b>Stesso lock della creazione.</b> Il portale chiede lo stato quando il suo push è andato in
+        /// errore, e il suo client rinuncia a 60 secondi mentre qui la creazione può restare sul Service Layer
+        /// fino a 100 (più login e allegati). Senza lock la lettura arriverebbe a creazione in volo, risponderebbe
+        /// «non c'è» e il portale annullerebbe il documento pochi secondi prima che SAP lo crei. Col lock attende:
+        /// al peggio il portale va in timeout, che per lui è «non verificabile» (l'annullo resta negato).</para>
+        /// <para>Dopo una creazione con esito incerto (<see cref="UncertainCreations"/>) «non c'è» non vale per un
+        /// po': si lancia, e il portale riceve «non verificabile».</para>
+        /// </summary>
+        public async Task<SalesDocumentState> GetStateAsync(string correlationId, CancellationToken cancellationToken = default)
         {
-            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
-            var tables = new List<string>();
-            foreach (var table in DbOdbcService.CorrelationLookupTables)
-                if ((await _db.GetUserFieldColumnsAsync(table)).Contains(udfInvId)) tables.Add(table);
-            // Nessuna tabella con il campo di correlazione: non si può dire "non c'è" (il portale libererebbe le
-            // ore di un documento forse esistente). Meglio un errore esplicito.
-            if (tables.Count == 0)
-                throw new InvalidOperationException($"Il campo utente {udfInvId} non esiste su nessuna tabella dei documenti di vendita: stato non verificabile.");
+            var key = correlationId.Trim();
+            using (await CorrelationLocks.AcquireAsync(key, cancellationToken))
+            {
+                var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+                var tables = new List<string>();
+                foreach (var table in DbOdbcService.CorrelationLookupTables)
+                    if ((await _db.GetUserFieldColumnsAsync(table)).Contains(udfInvId)) tables.Add(table);
+                // Nessuna tabella con il campo di correlazione: non si può dire "non c'è" (il portale libererebbe le
+                // ore di un documento forse esistente). Meglio un errore esplicito.
+                if (tables.Count == 0)
+                    throw new InvalidOperationException($"Il campo utente {udfInvId} non esiste su nessuna tabella dei documenti di vendita: stato non verificabile.");
 
-            var existing = SalesDocumentPayloadBuilder.SelectExisting(
-                await _db.FindSalesDocumentsByCorrelationIdAsync(correlationId.Trim(), tables));
-            return SalesDocumentPayloadBuilder.ToState(existing);
+                var existing = SalesDocumentPayloadBuilder.SelectExisting(
+                    await _db.FindSalesDocumentsByCorrelationIdAsync(key, tables));
+                if (existing == null && UncertainCreations.Shared.IsUncertain(key, DateTime.UtcNow, out var since))
+                    throw new InvalidOperationException(
+                        $"La creazione del documento {key} delle {since:HH:mm:ss} UTC non ha avuto risposta dal Service Layer: SAP potrebbe " +
+                        $"ancora registrarlo. Stato non verificabile per {UncertainCreations.Window.TotalMinutes:0} minuti da allora: riprovare più tardi.");
+                return SalesDocumentPayloadBuilder.ToState(existing);
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
