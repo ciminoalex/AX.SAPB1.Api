@@ -71,6 +71,21 @@ Aggiungi le configurazioni per il Service Layer:
 - `PUT /api/timesheet/{docEntry}` - Aggiorna un timesheet esistente
 - `DELETE /api/timesheet/{docEntry}` - Elimina un timesheet
 
+### Integrazione con il portale AX.360
+
+Contratto completo in [`API-ENDPOINTS.md`](../API-ENDPOINTS.md) (sezione "Integrazione ERP per il portale AX.360").
+Per la fatturazione dal portale:
+
+- `POST /api/sales-documents` (+ `/preview`) - fattura o ordine cliente, bozza o definitivo, idempotente su `correlationId`
+- `GET /api/sales-orders?since=` - ordini nati dal portale, con stato e fatture tratte
+- `POST /api/fiscal-projects` - nuovo progetto contabile (OPRJ) con codice dal pattern `SapB1:FiscalProjectCodePattern`
+- `GET /api/lookup/items?sellableOnly=true` - articoli di vendita attivi
+
+Interruttori (tutti in `SapB1`, opt-in dove la scrittura non è reversibile): `SalesDocuments:AllowPostedInvoices`
+(fatture definitive), `SalesDocuments:Attachments:Enabled` (PDF in `Attachments2`), `Bootstrap:UserFields:Enabled`
+(creazione degli UDF AX.360 all'avvio). Una seconda istanza su una company di test (`SapB1:CompanyDB`) si configura
+come descritto in [`INSTALLATION.md`](INSTALLATION.md) §11.
+
 ## Modelli Dati
 
 ### Timesheet

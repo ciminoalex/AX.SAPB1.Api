@@ -150,6 +150,8 @@ Preferisci variabili d’ambiente su `appsettings.json` per credenziali/host.
   - `SapB1__UserName`
   - `SapB1__Password`
 
+> **Attenzione — più istanze sullo stesso server.** Le variabili a livello `Machine` sono ereditate da TUTTI i servizi dell'host: un `SapB1__CompanyDB` impostato così per un'istanza di test farebbe puntare anche la produzione alla company di test (e un `ASPNETCORE_URLS` di macchina forzerebbe la stessa porta a entrambe). Con più istanze si configura ciascuna col proprio `appsettings.json` accanto all'exe (vedi §11), mai con variabili `Machine`.
+
 Esempio PowerShell (scope sistema):
 ```powershell
 [Environment]::SetEnvironmentVariable("ConnectionStrings__DefaultDatabase","Driver={HDBODBC};ServerNode=<hana-host>:30015;UID=<user>;PWD=<pwd>;","Machine")
@@ -336,3 +338,90 @@ Imposta livelli di log:
 - Mantieni versioni pubblicate in `C:\inetpub\AX.SAPB1.Api\releases\<version>`.
 - Usa uno swap atomico del path IIS o symlink aggiornando la `Physical Path`.
 - Conserva backup dell’`appsettings.Production.json` o delle variabili d’ambiente prima degli update.
+
+
+### 11) Seconda istanza di test su una company copiata (es. `SBO_MTF_AXTEST`)
+
+Serve a collaudare la fatturazione dal portale (documenti di vendita, ordini, progetti contabili) su una copia
+della company, senza toccare la produzione. È un **secondo servizio Windows**, con la sua cartella e il suo
+`appsettings.json`: la stessa build, nessuna modifica al codice.
+
+**Perché un processo separato e non un parametro.** La company si sceglie con una sola chiave,
+`SapB1:CompanyDB`, che pilota sia il Login del Service Layer sia lo schema di TUTTE le query ODBC (ogni tabella è
+qualificata come `"<CompanyDB>"."OINV"`, nessuno schema è scritto nel codice). La cache della sessione Service
+Layer però è per utente, non per company: un processo serve una company sola.
+
+**Prerequisiti sulla company copiata** (lato SAP, prima di avviare l'istanza):
+- la copia deve essere registrata in `SBOCOMMON` (copia/ripristino con gli strumenti SAP B1): copiare lo schema
+  HANA non basta, il Login con `CompanyDB = SBO_MTF_AXTEST` fallirebbe;
+- ragione sociale cambiata (`OADM.CompnyName`) così che nessuno la scambi per la produzione;
+- l'utente del Service Layer (`SapB1:UserName`) esiste nella copia e ha la licenza;
+- **cartella allegati**: la copia eredita `OADP.AttachPath` della produzione. Finché non punta a una cartella
+  dedicata (visibile al Service Layer, che su HANA gira su Linux) tenere `SapB1:SalesDocuments:Attachments:Enabled`
+  a `false`, altrimenti i PDF di test finirebbero nella cartella allegati di produzione.
+
+**Cartella e configurazione.** Es. `C:\Services\AX.SAPB1.Api.AxTest`, con l'exe e un `appsettings.json` proprio
+(`deploy.ps1` copia solo l'exe e non lo sovrascrive). Differenze rispetto alla produzione:
+
+```json
+{
+  "ConnectionStrings": { "DefaultDatabase": "Driver={HDBODBC};ServerNode=<hana-host>:30015;UID=<utente>;PWD=<password>;" },
+  "SapB1": {
+    "ServiceLayerUrl": "https://<hana-host>:50000/b1s/v1/",
+    "CompanyDB": "SBO_MTF_AXTEST",
+    "UserName": "<utente SL>",
+    "Password": "<password SL>",
+    "Write": { "Enabled": false },
+    "FiscalProjectCodePattern": "PRJ{yy}_{yy}{seq5}",
+    "SalesDocuments": {
+      "AllowPostedInvoices": true,
+      "Attachments": { "Enabled": false }
+    },
+    "Bootstrap": { "UserFields": { "Enabled": true } }
+  },
+  "Kestrel": {
+    "Endpoints": {
+      "Http": { "Url": "http://+:5012" }
+    }
+  },
+  "Jwt": { "Key": "<chiave DIVERSA dalla produzione>", "Issuer": "AX.SAPB1.Api", "Audience": "AX.SAPB1.Client", "ExpiresMinutes": 120 },
+  "Auth": { "ApiKeys": [ "<chiave API DIVERSA dalla produzione>" ] }
+}
+```
+
+- `Kestrel:Endpoints` definisce da solo le porte dell'istanza: niente endpoint `Https` sulla 7226 (è della
+  produzione, il secondo servizio non partirebbe), un endpoint `Http` su una porta dedicata (qui 5012). Se serve
+  HTTPS si aggiunge un endpoint `Https` su un'altra porta dedicata (es. 7227) con il pfx copiato a mano.
+  Partendo da una copia dell'`appsettings.json` di produzione non basta cambiare in `http://` l'URL
+  dell'endpoint `Https`: il blocco `Certificate` rimasto fa fallire l'avvio con "The non-HTTPS endpoint Https
+  includes HTTPS-only configuration for Certificate" (verificato). Va tolto l'intero endpoint `Https`.
+- `Bootstrap:UserFields:Enabled = true` crea all'avvio gli UDF `AX360_InvId/InvNum/DocType` anche su `ORDR`
+  nella copia: senza, gli ordini vengono rifiutati (il documento non si crea senza campo di correlazione).
+  Sull'istanza di produzione resta spento (chiave assente = spento): i metadati di `SBO_MTF` non si toccano.
+- `SalesDocuments:AllowPostedInvoices` abilita le fatture DEFINITIVE (irreversibili). Assente/false = solo bozze
+  e ordini: il POST di una fattura definitiva risponde 403.
+- Chiavi `Jwt:Key` e `Auth:ApiKeys` distinte dalla produzione: una chiave di test non deve aprire la produzione.
+
+**Primo impianto** (PowerShell come amministratore sul server; `deploy.ps1` richiede che l'exe esista già):
+
+```powershell
+New-Item -ItemType Directory -Force C:\Services\AX.SAPB1.Api.AxTest
+# copiare AX.SAPB1.Api.exe (publish win-x64 single-file) e l'appsettings.json dell'istanza
+sc.exe create AX.SAPB1.Api.AxTest binPath= "C:\Services\AX.SAPB1.Api.AxTest\AX.SAPB1.Api.exe" start= auto DisplayName= "AX.SAPB1.Api (test SBO_MTF_AXTEST)"
+sc.exe start AX.SAPB1.Api.AxTest
+```
+
+Log in `C:\Services\AX.SAPB1.Api.AxTest\logs` (separati dalla produzione). All'avvio si vede
+`Opening ODBC connection to schema SBO_MTF_AXTEST` e, con il bootstrap acceso, la creazione degli UDF.
+
+**Aggiornamenti:** `deploy.ps1 -ServiceName AX.SAPB1.Api.AxTest -RemoteDir C:\Services\AX.SAPB1.Api.AxTest -Port <porta>`.
+Il suo health-check interroga `https://<server>:<porta>/swagger`: con un'istanza solo HTTP passare la porta di
+un endpoint `Https` dedicato, oppure verificare a mano (`http://<server>:5012/swagger`).
+
+**Collaudo** (Swagger o `AX.SAPB1.Api.http`, header `X-Api-Key` di test):
+1. `GET /api/lookup/items?sellableOnly=true` — articoli di vendita attivi;
+2. `POST /api/sales-documents/preview` — payload che verrebbe inviato, avvisi (UdM, UDF assenti), documento esistente;
+3. `POST /api/sales-documents` bozza fattura → 201; stesso `correlationId` di nuovo → 200 con `alreadyExisted = true`, nessun doppione;
+4. fattura definitiva (con `AllowPostedInvoices`), ordine in bozza e definitivo, allegato (dopo aver sistemato `OADP.AttachPath`);
+5. `GET /api/invoices` e `GET /api/sales-orders` — correlazione, stato dell'ordine, fatture tratte (`INV1.BaseType = 17`);
+6. `POST /api/fiscal-projects` → codice `PRJ<yy>_<yy><progressivo>` successivo al massimo dell'anno.

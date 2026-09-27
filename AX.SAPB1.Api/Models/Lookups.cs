@@ -86,6 +86,22 @@ namespace AX.SAPB1.Api.Models
         public string Name { get; set; } = string.Empty;
     }
 
+    /// <summary>
+    /// Articolo di magazzino/servizio (OITM) per la scelta dell'articolo sulle righe dei documenti di vendita
+    /// del portale. <see cref="Active"/> è calcolato su validFor/frozenFor con le loro date (vedi
+    /// <c>DbOdbcService.IsItemActive</c>).
+    /// </summary>
+    public class ErpItemDto
+    {
+        public string ItemCode { get; set; } = string.Empty;
+        public string ItemName { get; set; } = string.Empty;
+        public string? GroupName { get; set; }
+        public bool Active { get; set; }
+
+        /// <summary>Gruppo IVA di vendita di default dell'articolo (<c>OITM."VatGourpSa"</c>, refuso SAP).</summary>
+        public string? SalesVatGroup { get; set; }
+    }
+
     public class ActivityTimeTotal
     {
         public string Project { get; set; } = string.Empty;

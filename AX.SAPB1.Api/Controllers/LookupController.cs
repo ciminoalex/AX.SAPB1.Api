@@ -124,6 +124,26 @@ namespace AX.SAPB1.Api.Controllers
                 return StatusCode(500, "Errore interno del server durante il recupero delle risorse");
             }
         }
+
+        /// <summary>
+        /// Articoli (OITM) per le righe dei documenti di vendita del portale. Con <c>sellableOnly=true</c> solo
+        /// gli articoli di vendita (<c>SellItem = 'Y'</c>) attivi oggi secondo validFor/frozenFor e relative date;
+        /// altrimenti tutti, con il flag <c>active</c>.
+        /// </summary>
+        [HttpGet("items")]
+        public async Task<ActionResult<IEnumerable<ErpItemDto>>> GetItems([FromQuery] bool sellableOnly = false)
+        {
+            try
+            {
+                var list = await _dbOdbcService.GetSellableItemsAsync(sellableOnly);
+                return Ok(list);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving items (sellableOnly={SellableOnly})", sellableOnly);
+                return StatusCode(500, "Errore interno del server durante il recupero degli articoli");
+            }
+        }
     }
 }
 

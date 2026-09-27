@@ -10,7 +10,7 @@ using AX.SAPB1.Api.Models;
 
 namespace AX.SAPB1.Api.Services
 {
-    public class SapB1ServiceLayerService : ISapB1ServiceLayerService
+    public partial class SapB1ServiceLayerService : ISapB1ServiceLayerService
     {
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _configuration;
@@ -789,13 +789,13 @@ namespace AX.SAPB1.Api.Services
         public async Task EnsureAx360UserFieldsAsync()
         {
             // Provisioning dei campi utente AX.360, raggruppati per tabelle bersaglio:
-            //  • OINV/ODRF: correlazione fattura↔bozza (lo stesso campo su entrambe propaga il valore
+            //  • OINV/ODRF/ORDR: correlazione documento↔bozza (lo stesso campo su tutte propaga il valore
             //    alla conferma della bozza);
             //  • OITM/OACT: categoria di ricavo per la "Composizione dello scaduto" del portale — usata
             //    sull'anagrafica articolo (righe a articolo) e sul conto contabile (righe di servizio).
             var groups = new (string[] Tables, (string Name, string Type, int Size, string Desc)[] Fields)[]
             {
-                (new[] { "OINV", "ODRF" }, new (string, string, int, string)[]
+                (new[] { "OINV", "ODRF", "ORDR" }, new (string, string, int, string)[]
                 {
                     (Ax360Udf.InvId,   "db_Alpha", 50, "AX.360 invoice correlation id"),
                     (Ax360Udf.InvNum,  "db_Alpha", 50, "AX.360 invoice number"),
