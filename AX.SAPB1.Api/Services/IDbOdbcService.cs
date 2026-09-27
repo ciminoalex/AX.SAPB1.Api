@@ -18,6 +18,13 @@ namespace AX.SAPB1.Api.Services
         /// </summary>
         Task<IEnumerable<TimesheetBillingState>> GetTimesheetBillingStatesAsync(DateTime from, DateTime to);
 
+        /// <summary>
+        /// Stato corrente (annullo, fatturazione, ore lorde e fatturabili) di una riga di timesheet per
+        /// <c>DocEntry</c>, per decidere se <c>PATCH /api/timesheet/{docEntry}/hours</c> può scrivere. Null se
+        /// la riga non esiste. Sola lettura.
+        /// </summary>
+        Task<TimesheetHoursState?> GetTimesheetHoursStateAsync(int docEntry);
+
         // Lookups
         Task<IEnumerable<CustomerSummary>> GetCustomersAsync();
 

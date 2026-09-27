@@ -46,6 +46,12 @@ In SAP Business One, crea un UDO chiamato "TIMESHEET" con i seguenti campi:
 | U_Description | Text | No | Descrizione del lavoro |
 | U_Status | Text | No | Stato del timesheet |
 
+> Sull'impianto MTF la tabella reale è `@SGS_PRJ_OTMS` (UDO dell'AddOn SGS), indirizzata dal Service Layer per `Code`
+> ma identificata verso il portale AX.360 per `DocEntry`. Campi ore scritti dal servizio: `U_TimeNrTot` = ore lorde,
+> `U_TimeNrNet` = ore **fatturabili** (è la quantità che SGS usa in fattura, solo righe con `U_TimeNrNet > 0`),
+> `U_TimeNrNF` = lorde − fatturabili. Una riga con `U_Status = 'Fatturato'` o `U_DestEntry` valorizzato non viene
+> mai modificata dal servizio (`PATCH /api/timesheet/{docEntry}/hours` risponde 409 `billed`).
+
 ### 4. Configurazione dell'Applicazione
 1. Modifica `appsettings.json` o `appsettings.Development.json`
 2. Aggiorna la stringa di connessione ODBC
@@ -430,3 +436,12 @@ un endpoint `Https` dedicato, oppure verificare a mano (`http://<server>:5012/sw
 5. `GET /api/invoices` e `GET /api/sales-orders` — correlazione, stato dell'ordine, fatture tratte (`INV1.BaseType = 17`);
 6. `POST /api/fiscal-projects` → codice `PRJ<yy>_<yy><progressivo>` successivo al massimo dell'anno di CREAZIONE (`codeYear` o oggi a Roma, mai l'anno di `validFrom`); la stessa richiesta con lo stesso `idempotencyKey` ripetuta → 200, stesso codice, `created = false`;
 7. `GET /api/sales-documents/by-correlation/{id}` → `found`, tipo, stato, `cancelled` del documento creato.
+8. timesheet con ore fatturabili: `POST /api/timesheet/lite` con `billableHours` minore di `hours` → in SAP
+   `U_TimeNrTot = hours`, `U_TimeNrNet = billableHours`, `U_TimeNrNF` la differenza; `PATCH /api/timesheet/{docEntry}/hours`
+   con nuovi valori → 200 `updated`; la stessa richiesta di nuovo → 200 `unchanged`; con `expectedBillableHours` diverso
+   da SAP → 409 `changed_in_erp`; su una riga «Fatturato» → 409 `billed`; `GET /api/timesheet/billing-state` riporta
+   `hours` (fatturabili) e `totalHours` (lorde, `null` se illeggibili).
+   **Ordine di rilascio:** questo servizio va aggiornato PRIMA del portale AX.360 che invia `billableHours`: un
+   servizio precedente ignora il campo e scrive `U_TimeNrNet = hours` (vedi `API-ENDPOINTS.md`, "Ordine di
+   rilascio"). Prima del rilascio va anche deciso il punto aperto sui campi orari (`U_TimeNF`/`U_TimeEnd`), stessa
+   sezione.

@@ -41,8 +41,12 @@ Gli endpoint marcati **Protetto** richiedono questo header. Il token è legato a
 | GET | `/api/timesheet/project/{projectId}` | Sì | Timesheet per progetto |
 | GET | `/api/timesheet/daterange` | Sì | Timesheet per intervallo date globale (query) |
 | GET | `/api/timesheet/activity-time-tot` | Sì | Totale ore per progetto + attività (query) |
+| GET | `/api/timesheet/billing-state` | Sì | Stato di fatturazione delle righe nella finestra `from`/`to` (ore fatturabili `hours` e lorde `totalHours`) |
 | POST | `/api/timesheet` | Sì | Crea timesheet (SAP Service Layer) |
+| POST | `/api/timesheet/lite` | Sì | Crea timesheet da payload semplificato; `billableHours` facoltativo |
+| POST | `/api/timesheet/lite/preview` | Sì | Come `/lite`, restituisce il payload del Service Layer senza scrivere |
 | PUT | `/api/timesheet/{docEntry}` | Sì | Aggiorna timesheet (SAP Service Layer); `DocEntry` URL = body |
+| PATCH | `/api/timesheet/{docEntry}/hours` | Sì | Aggiorna **solo** ore lorde/fatturabili di una riga non fatturata (merge a tre vie con il portale) |
 | DELETE | `/api/timesheet/{code}` | Sì | Elimina timesheet per **codice** alfanumerico (non `DocEntry`) |
 | GET | `/api/lookup/customers` | Sì | Elenco clienti |
 | GET | `/api/customers` | Sì | Profili anagrafici estesi (bulk) per il mirror ExternalCustomerProfile del portale |
@@ -101,7 +105,14 @@ Timesheet per risorsa/dipendente.
 #### `GET /employee/{employeeId}/daterange?startDate=&endDate=`
 
 - **Query obbligatorie:** `startDate`, `endDate` (`DateTime`)
-- **200:** `Timesheet[]`
+- **200:** `Timesheet[]`, **comprese le righe annullate** (la query non filtra `Canceled`: serve anche ad altri
+  chiamanti). Ogni riga porta il campo additivo **`canceled`** (`bool?`, colonna di sistema `Canceled`): `true` =
+  riga annullata (`'Y'`), `false` = attiva (`'N'`), `null` = valore assente o illeggibile. Un servizio precedente non
+  manda il campo: per il chiamante vale come `null`. Chi cerca la riga creata da un proprio push (il portale, dopo un
+  timeout) scarta **solo** le righe con `canceled = true` e tratta `null`/assente come riga non annullata: altrimenti,
+  con un servizio non aggiornato, ogni ricerca risponderebbe "non lo so" e i nuovi tentativi resterebbero fermi. Tutte
+  le altre risposte che portano un `Timesheet` (le altre letture, e le risposte di `POST`, `POST /lite` e `PUT`)
+  non leggono la colonna e restituiscono sempre `canceled: null`.
 - **500:** errore server
 
 #### `GET /project/{projectId}`
@@ -142,6 +153,32 @@ Crea documento tramite SAP B1 Service Layer.
 - **200:** `Timesheet`
 - **400:** modello non valido o `DocEntry` non allineato
 - **500:** errore server
+
+> Se `TimeNrTot` è valorizzato, questo endpoint scrive anche `U_TimeNrNet = TimeNrTot`: **non** usarlo per righe
+> con ore fatturabili ridotte (azzererebbe la riduzione). Per le sole ore usare `PATCH /{docEntry}/hours`.
+
+#### `POST /lite` e `POST /lite/preview`
+
+Creazione da payload semplificato (`TimesheetCreateRequestLite`, guida operativa in
+[`TIMESHEET-LITE-INTEGRAZIONE.md`](TIMESHEET-LITE-INTEGRAZIONE.md)); `/preview` restituisce il payload del Service
+Layer senza scrivere. Campo facoltativo **`billableHours`** (ore fatturabili): assente/`null` = uguale a `hours`
+(comportamento precedente). Scrittura: `U_TimeNrTot = hours`, `U_TimeNrNet = billableHours ?? hours`,
+`U_TimeNrNF = hours - U_TimeNrNet` (`U_TimeNrPa` e i campi `*Ori` restano a zero, `U_TimeEnd` resta calcolata sulle
+ore lorde).
+
+- **201:** `Timesheet` (solo `/lite`); **200:** `TimesheetServiceLayerPayload` (solo `/preview`)
+- **400:** `hours` assente o `<= 0`; `billableHours` fuori da `[0, hours]`; dati anagrafici del progetto incompleti
+- **404:** progetto o attività non trovati
+
+#### `PATCH /{docEntry}/hours`
+
+Aggiorna le sole ore di una riga già spinta e non fatturata. Contratto completo nella sezione
+[Timesheet del portale AX.360](#timesheet-ore-lorde-e-ore-fatturabili).
+
+#### `GET /billing-state?from=&to=`
+
+Stato di fatturazione delle righe con `U_Date` in `[from, to]` (massimo 400 giorni). Contratto nella sezione
+[Timesheet del portale AX.360](#timesheet-ore-lorde-e-ore-fatturabili).
 
 #### `DELETE /{code}`
 
@@ -382,6 +419,135 @@ Endpoint consumati dal connettore `SapB1ErpConnector` di AX.360. Autenticazione 
 | GET | `/api/lookup/projects/{code}/activities` | WBS del progetto. |
 | GET | `/api/lookup/resources` | Risorse. |
 | GET | `/api/lookup/items?sellableOnly=true` | Articoli (`OITM`): `[{ itemCode, itemName, groupName, active, salesVatGroup }]`. Con `sellableOnly=true` solo `SellItem='Y'` attivi oggi; `active` è calcolato su `validFor`/`frozenFor` con le loro date (un articolo con entrambi a `N` è attivo). |
+
+### Timesheet: ore lorde e ore fatturabili
+
+SGS (AddOn SAP B1) fattura il T&M dalla tabella `@SGS_PRJ_OTMS` usando **`U_TimeNrNet`** come quantità di riga (e
+seleziona solo le righe con `U_TimeNrNet > 0`). Quindi le ore che il portale considera fatturabili devono stare in
+`U_TimeNrNet`, non solo le ore lorde: `U_TimeNrTot` = ore lorde, `U_TimeNrNet` = ore fatturabili, `U_TimeNrNF` =
+lorde − fatturabili. L'identificativo di riga è sempre **`DocEntry`** (mai `Code`: le due colonne divergono su ~12%
+delle righe).
+
+| Metodo | Path | Descrizione |
+| --- | --- | --- |
+| POST | `/api/timesheet/lite` | Crea la riga. Nuovo campo facoltativo `billableHours` (assente/`null` = `hours`); `0 <= billableHours <= hours`, altrimenti **400**. Risposta 201 con `docEntry`. |
+| PATCH | `/api/timesheet/{docEntry}/hours` | Aggiorna **solo** `U_TimeNrTot`/`U_TimeNrNet`/`U_TimeNrNF` di una riga non fatturata, senza sovrascrivere modifiche fatte a mano in SAP (vedi sotto). |
+| GET | `/api/timesheet/billing-state?from=&to=` | Stato di fatturazione: `[{ erpDocId, state, invoiceErpDocNumber, invoicedOn, hours, totalHours, erpResourceCode, erpProjectCode, erpActivityCode, workedOn }]`. `hours` = `U_TimeNrNet` (fatturabili), **`totalHours`** = `U_TimeNrTot` (lorde, campo additivo). `hours` assente o illeggibile vale 0 (contratto esistente); `totalHours` assente o illeggibile vale **`null`** ("non lo so": il portale non confronta). |
+| GET | `/api/timesheet/employee/{resId}/daterange?startDate=&endDate=` | Righe di una risorsa (usato dal portale per ritrovare una riga dopo un push andato in timeout): ogni `Timesheet` porta `timeNrTot`, `timeNrNet`, `timeNrNF`, `timeNrPa` e il campo additivo **`canceled`** (`true` = `Canceled = 'Y'`, `false` = `'N'`, `null` = assente/illeggibile). Le righe annullate **non** sono filtrate (la query serve anche ad altri chiamanti): chi cerca la riga del proprio push scarta **solo** quelle con `canceled = true` e tratta `null` (o il campo assente, servizio precedente) come riga non annullata. |
+
+**`PATCH /api/timesheet/{docEntry}/hours`** — merge a tre vie: base = ultimo valore spinto dal portale (`expected*`),
+nostro = portale (`hours`/`billableHours`), loro = SAP. "Loro" si legge due volte: via ODBC per la prima decisione
+(economica, senza sessione del Service Layer) e, se questa dice di scrivere, di nuovo dal Service Layer subito prima
+del PATCH (vedi "Finestra fra lettura e scrittura" sotto).
+
+Request:
+```json
+{ "hours": 4.0, "billableHours": 2.5, "expectedHours": 4.0, "expectedBillableHours": 4.0 }
+```
+
+| Campo | Obbligatorio | Significato |
+| --- | --- | --- |
+| `hours` | **sì**, `> 0` | ore lorde, scritte in `U_TimeNrTot` |
+| `billableHours` | **sì**, `0 <= billableHours <= hours` | ore fatturabili, scritte in `U_TimeNrNet` (la quantità che SGS fattura) |
+| `expectedHours` | no | ore lorde che il chiamante si aspetta in SAP (l'ultimo valore spinto) |
+| `expectedBillableHours` | no | ore fatturabili che il chiamante si aspetta in SAP (l'ultimo valore spinto) |
+
+**`billableHours` è obbligatorio in questo endpoint.** Se manca o è `null` la risposta è 400 `invalid` e la riga non
+viene né letta né scritta. A differenza di `POST /lite`, qui l'assenza **non** vale "uguale a `hours`": in un
+aggiornamento un campo dimenticato riporterebbe alle ore piene le fatturabili che il capo progetto aveva ridotto, cioè
+proprio il guasto che questo endpoint esiste per correggere. `expectedHours`/`expectedBillableHours`, se presenti,
+abilitano il controllo di concorrenza, ciascuno sulla sua colonna; assenti o `null` = nessun controllo su quella
+colonna.
+
+Risposte, in quest'ordine di valutazione:
+
+| HTTP | `outcome` | Quando |
+| --- | --- | --- |
+| 400 | `invalid` | `hours` assente o `<= 0`, `billableHours` assente o fuori da `[0, hours]` |
+| 404 | `not_found` | nessuna riga con quel `DocEntry`; il corpo c'è **sempre** e porta `outcome = "not_found"` (un 404 senza corpo o senza `outcome` = rotta assente, servizio non aggiornato: vedi sotto) |
+| 409 | `canceled` | `Canceled = 'Y'` |
+| 409 | `billed` | `U_Status = 'Fatturato'` **oppure** `U_DestEntry` valorizzato (non null e non 0): le righe fatturate non si toccano mai |
+| 200 | `unchanged` | in SAP (`U_TimeNrTot`, `U_TimeNrNet`) valgono già (`hours`, `billableHours`) entro 0,001: un nuovo tentativo dopo un timeout riuscito non scrive due volte |
+| 409 | `changed_in_erp` | `expected*` presenti e diversi da SAP (tolleranza 0,001): la riga è stata modificata in SAP dopo il push, non si sovrascrive |
+| 200 | `updated` | scritti `U_TimeNrTot = hours`, `U_TimeNrNet = billableHours`, `U_TimeNrNF = hours − billableHours` (nessun altro campo) |
+| 502 | `error` | il Service Layer ha rifiutato la ricerca della riga o la scrittura (`message` riporta l'errore SAP); anche un 401 sul PATCH finisce qui, senza secondo invio |
+| 499 | `error` | il chiamante ha abbandonato la richiesta (timeout) prima del PATCH: **nessuna scrittura**; nessuno legge la risposta, conta il log |
+| 500 | — | errore interno (ODBC/Service Layer non raggiungibili): corpo testuale, stato della riga non verificato |
+
+Corpo di 200/409 (e 400/404/502):
+```json
+{ "outcome": "updated", "currentHours": 4.0, "currentBillableHours": 2.5, "message": null }
+```
+`currentHours`/`currentBillableHours` = valori in SAP dopo l'operazione (per `updated` i nuovi valori; `null` se
+assenti o illeggibili).
+
+**404: riga assente o rotta assente.** Il 404 della riga assente porta **sempre** questo corpo:
+```json
+{ "outcome": "not_found", "currentHours": null, "currentBillableHours": null, "message": "Riga di timesheet non trovata in SAP" }
+```
+(il testo di `message` è informativo e può cambiare; il contratto è `outcome`). Un 404 **senza corpo**, o con un corpo
+che non porta `outcome` (pagina HTML di IIS o di un proxy, `ProblemDetails`, …), significa invece che la **rotta non
+esiste**: servizio non ancora aggiornato o URL base sbagliato, **non** riga mancante. Anche un `{docEntry}` non intero
+dà un 404 di rotta (vincolo `:int`). Il chiamante distingue i due casi solo da `outcome`: il portale blocca la riga
+su `not_found` (fino alla prossima modifica delle ore) e sul 404 di rotta si limita a ritentare al giro dopo.
+
+Scrittura via Service Layer come `PUT /api/timesheet/{docEntry}`: ricerca della riga con
+`SGS_PRJ_OTMS?$filter=DocEntry eq …` per ricavarne il `Code`, poi `PATCH SGS_PRJ_OTMS('{Code}')`. Ogni aggiornamento
+è registrato nel log (Information: `DocEntry`, ore da → a); rifiuti e conflitti a livello Warning/Error.
+
+**Finestra fra lettura e scrittura.** Fra la lettura ODBC e il PATCH ci sono la validazione della sessione del
+Service Layer (o un login, che può restare appeso) e la ricerca del `Code`: un intervallo non limitato in cui SGS
+può fatturare la riga o un utente modificarla. Per questo la riga restituita dalla ricerca (`Canceled`,
+`U_Status`, `U_DestEntry`, `U_TimeNrTot`, `U_TimeNrNet`, letti con gli stessi parser tolleranti) viene ridecisa con
+la stessa richiesta subito prima del PATCH: se non è più `updated` il PATCH non parte e la risposta è quella nuova
+(409 `billed`/`canceled`/`changed_in_erp` o 200 `unchanged`). Una colonna che il Service Layer non espone affatto
+prende il valore letto via ODBC. Resta scoperto solo il giro fra la ricerca e il PATCH. Il PATCH non si ripete
+dopo un 401 (un nuovo login farebbe invecchiare di nuovo la decisione): torna 502 e il tentativo successivo del
+portale rilegge tutto. Il lock per `DocEntry` serializza le richieste dello stesso processo.
+
+**Chiamante andato via.** Il token della richiesta si controlla dopo la lettura ODBC, dopo la sessione, sulla
+ricerca e subito prima del PATCH: se il portale è già andato in timeout, non si scrive (499). Senza questo
+controllo una scrittura arrivata tardi farebbe trovare al tentativo successivo del portale valori diversi sia
+dagli `expected*` sia dalla richiesta, cioè un falso 409 `changed_in_erp`. Resta la corsa "abbandono dopo l'invio
+del PATCH", che il ramo `unchanged` copre quando il nuovo tentativo porta gli stessi valori.
+
+**Ore in testo.** `U_TimeNrTot`/`U_TimeNrNet` possono arrivare come testo: si leggono a cultura invariante con il
+solo punto decimale. Un testo con la virgola («6,5») è illeggibile (`null`), non 65: meglio "non lo so" (che con
+gli `expected*` presenti dà `changed_in_erp`, cioè nessuna scrittura) di un numero dieci volte più grande.
+
+**Ordine di rilascio: prima il servizio, poi il portale.** Un servizio precedente ignora `billableHours` nella
+`POST /lite` e scrive `U_TimeNrNet = hours`. Se il portale nuovo registrasse come base il valore che ha *inviato*
+invece di quello che SAP ha *scritto*, portale e base coinciderebbero, la riconciliazione non manderebbe mai il
+PATCH e SGS fatturerebbe le ore piene sulle righe spinte in quella finestra, anche dopo l'aggiornamento del servizio.
+La risposta 201 di `POST /lite` riporta la riga come l'ha restituita SAP (`timeNrTot`, `timeNrNet`, `timeNrNF`):
+è quella la base da registrare, con il valore inviato solo come riserva se la risposta non la porta.
+
+**Punto aperto (verificato sul sorgente SGS, da decidere prima del rilascio): campi orari non allineati.** Il
+servizio scrive solo i campi numerici delle ore: la creazione lite lascia `U_TimeNF` (ore non fatturabili in
+formato orario) vuoto anche quando `U_TimeNrNF` > 0, e il PATCH cambia `U_TimeNrTot` senza spostare `U_TimeEnd`
+(09:00 + le ore lorde di prima). Il form timesheet dell'AddOn (`FormTimesheet.CalcolaTotali`) ricalcola
+`U_TimeNrTot = U_TimeEnd − U_TimeStart − U_TimePa`, `U_TimeNrNF` da `U_TimeNF` e `U_TimeNrNet = U_TimeNrTot −
+U_TimeNrNF`, ma **solo** quando un utente modifica in quel form uno dei campi orari della riga (inizio, fine,
+totale, pausa, non fatturabili): aprire la riga, o salvarla senza toccare quei campi, non ricalcola nulla. Se il
+ricalcolo parte su una riga con fatturabili ridotte, `U_TimeNrNF` viene rifatto da `U_TimeNF`, che il servizio lascia
+vuoto (quindi zero, salvo che l'utente compili proprio quel campo), `U_TimeNrNet` torna alle ore piene e SGS le fattura; se un PATCH aveva cambiato le ore lorde, anche `U_TimeNrTot` torna a quelle
+ricavate da `U_TimeEnd`.
+
+**Il portale non se ne accorge da solo.** Una modifica fatta in SAP non genera di per sé nessun `changed_in_erp`: il
+409 esiste solo come risposta a un PATCH, e il portale manda il PATCH solo per le righe le cui ore **nel portale**
+sono cambiate rispetto all'ultimo valore spinto (la base del merge). Finché le ore della rendicontazione nel portale
+restano quelle, nessun PATCH parte, e nemmeno la lettura dello stato di fatturazione (`GET /billing-state`) lo
+segnala: per una riga di cui il portale conosce già l'ultimo valore spinto — tutte quelle spinte con le fatturabili —
+uno scostamento di SAP da quel valore non produce né un avviso né una scrittura. SGS fattura quindi le ore piene
+senza alcuna segnalazione. Il portale se ne accorge solo se **dopo** il ricalcolo le ore cambiano di nuovo nel
+portale: il PATCH successivo porta come `expected*` l'ultimo valore spinto, SAP non lo ha più e la risposta è 409
+`changed_in_erp` (riga bloccata e segnalata, nessuna sovrascrittura); oppure 200 `unchanged` se le nuove ore del
+portale coincidono con quelle ricalcolate in SAP, o 409 `billed` se nel frattempo SGS ha già fatturato la riga.
+
+Estensione possibile, fuori dal contratto attuale: scrivere `U_TimeNF` (hh:mm:ss delle ore non
+fatturabili) nella creazione lite e nel PATCH, e `U_TimeEnd` nel PATCH quando cambiano le ore lorde; va provata
+prima su una company di test (formato del campo orario nel Service Layer, e `MapSapResponseToTimesheet` che oggi
+legge `U_TimeNF` come intero).
 
 ### Fatture (mirror finanziario + push come bozza)
 | Metodo | Path | Descrizione |

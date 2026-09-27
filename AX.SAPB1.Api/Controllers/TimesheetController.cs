@@ -1,6 +1,10 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
 using AX.SAPB1.Api.Models;
 using AX.SAPB1.Api.Services;
+using AX.SAPB1.Api.Services.SalesDocuments;
+using AX.SAPB1.Api.Services.Timesheets;
+using AX.SAPB1.Api.Support;
 
 namespace AX.SAPB1.Api.Controllers
 {
@@ -8,6 +12,12 @@ namespace AX.SAPB1.Api.Controllers
     [Route("api/[controller]")]
     public class TimesheetController : ControllerBase
     {
+        // Serializza, dentro il processo, gli aggiornamenti ore della STESSA riga: "leggi lo stato, decidi,
+        // scrivi" non è atomico, e due PATCH concorrenti del portale sulla stessa riga non devono intrecciarsi.
+        // Da chi scrive in SAP nel frattempo (SGS che fattura, un utente) protegge invece la rilettura della riga
+        // dal Service Layer subito prima del PATCH: vedi il doc dell'azione.
+        private static readonly KeyedAsyncLock HoursLocks = new();
+
         private readonly IDbOdbcService _dbOdbcService;
         private readonly ISapB1ServiceLayerService _sapB1Service;
         private readonly ILogger<TimesheetController> _logger;
@@ -228,6 +238,10 @@ namespace AX.SAPB1.Api.Controllers
                 if (request.Hours is null || request.Hours <= 0)
                     return BadRequest("Il campo Hours deve essere maggiore di zero");
 
+                var billableError = TimesheetHoursRules.ValidateBillableHours(request.Hours.Value, request.BillableHours);
+                if (billableError is not null)
+                    return BadRequest(billableError);
+
                 var dependencyResult = await ResolveLiteDependenciesAsync(request);
                 if (dependencyResult.ErrorResult is not null)
                     return dependencyResult.ErrorResult;
@@ -258,6 +272,10 @@ namespace AX.SAPB1.Api.Controllers
 
                 if (request.Hours is null || request.Hours <= 0)
                     return BadRequest("Il campo Hours deve essere maggiore di zero");
+
+                var billableError = TimesheetHoursRules.ValidateBillableHours(request.Hours.Value, request.BillableHours);
+                if (billableError is not null)
+                    return BadRequest(billableError);
 
                 var dependencyResult = await ResolveLiteDependenciesAsync(request);
                 if (dependencyResult.ErrorResult is not null)
@@ -318,6 +336,123 @@ namespace AX.SAPB1.Api.Controllers
                 _logger.LogError(ex, "Error updating timesheet with DocEntry {DocEntry}", docEntry);
                 return StatusCode(500, "Errore interno del server durante l'aggiornamento del timesheet");
             }
+        }
+
+        /// <summary>
+        /// Aggiorna le ore lorde e fatturabili di una riga di timesheet già spinta dal portale e non ancora
+        /// fatturata: <c>U_TimeNrTot = hours</c>, <c>U_TimeNrNet = billableHours</c> (la quantità che SGS fattura),
+        /// <c>U_TimeNrNF = hours - billableHours</c>, e nient'altro.
+        /// <para>
+        /// È il lato servizio di un merge a tre vie (base = ultimo valore spinto, nostro = portale, loro = SAP): la
+        /// decisione è in <see cref="TimesheetHoursRules.Decide"/> (pura, testata). Risposte:
+        /// 400 <c>invalid</c>; 404 <c>not_found</c>; 409 <c>canceled</c>; 409 <c>billed</c> (<c>U_Status</c>
+        /// «Fatturato» o <c>U_DestEntry</c> valorizzato: le righe fatturate non si toccano MAI); 200
+        /// <c>unchanged</c> (SAP ha già quei valori: un nuovo tentativo dopo un timeout riuscito non scrive due
+        /// volte); 409 <c>changed_in_erp</c> (con <c>expected*</c> presenti e diversi da SAP: modificata a mano, non
+        /// si sovrascrive); 200 <c>updated</c>; 502 <c>error</c> se il Service Layer rifiuta la ricerca o la scrittura.
+        /// </para>
+        /// <para>
+        /// <b>Due letture, una sola decisione che conta.</b> La prima decisione si prende sul dato ODBC: costa poco e
+        /// risponde a <c>not_found</c>/<c>billed</c>/<c>unchanged</c>/... senza aprire una sessione del Service Layer.
+        /// Se dice «scrivi», il Service Layer rilegge la riga e ridecide subito prima del PATCH
+        /// (<see cref="ISapB1ServiceLayerService.UpdateTimesheetHoursAsync"/>): la validazione della sessione o un
+        /// login possono durare a lungo, e una riga fatturata in quell'intervallo non deve essere sovrascritta. Resta
+        /// scoperto solo il giro fra quella rilettura e il PATCH. Il lock per riga serializza le richieste di questo
+        /// processo, non chi scrive direttamente in SAP.
+        /// </para>
+        /// <para>
+        /// <b>Chiamante andato via.</b> Se il portale abbandona la richiesta (timeout) prima del PATCH, non si scrive:
+        /// una scrittura arrivata tardi farebbe sembrare al suo tentativo successivo la riga modificata a mano in SAP.
+        /// Resta la corsa inevitabile "abbandono dopo l'invio del PATCH", che il ramo <c>unchanged</c> copre quando il
+        /// nuovo tentativo porta gli stessi valori.
+        /// </para>
+        /// </summary>
+        [HttpPatch("{docEntry:int}/hours")]
+        public async Task<ActionResult<TimesheetHoursUpdateResult>> UpdateTimesheetHours(int docEntry, [FromBody] TimesheetHoursUpdateRequest request)
+        {
+            var validationError = TimesheetHoursRules.ValidateUpdate(request);
+            if (validationError is not null)
+                return BadRequest(new TimesheetHoursUpdateResult { Outcome = TimesheetHoursOutcome.Invalid, Message = validationError });
+
+            var cancellationToken = HttpContext?.RequestAborted ?? CancellationToken.None;
+            try
+            {
+                using var rowLock = await HoursLocks.AcquireAsync(docEntry.ToString(CultureInfo.InvariantCulture), cancellationToken);
+
+                var current = await _dbOdbcService.GetTimesheetHoursStateAsync(docEntry);
+                var decision = TimesheetHoursRules.Decide(current, request);
+
+                if (!decision.ShouldWrite)
+                    return NoWrite(docEntry, request, decision, recheck: false);
+
+                // La lettura ODBC può aver atteso a lungo il lock o il database: se il portale se n'è già andato,
+                // non si apre nemmeno la sessione del Service Layer.
+                cancellationToken.ThrowIfCancellationRequested();
+                var write = await _sapB1Service.UpdateTimesheetHoursAsync(docEntry, request, current, cancellationToken);
+
+                if (write.Superseded is { } superseded)
+                    return NoWrite(docEntry, request, superseded, recheck: true);
+
+                var before = write.Fresh ?? current!;
+                var response = write.Response!;
+                if (!response.IsSuccess)
+                {
+                    var sapMessage = ServiceLayerErrors.ExtractMessage(response.Body);
+                    _logger.LogError(
+                        "Timesheet DocEntry {DocEntry}: il Service Layer ha rifiutato l'aggiornamento ore a {Hours}/{BillableHours} (HTTP {Status}): {SapMessage}",
+                        docEntry, request.Hours, request.BillableHours, response.StatusCode, sapMessage);
+                    return StatusCode(StatusCodes.Status502BadGateway, new TimesheetHoursUpdateResult
+                    {
+                        Outcome = TimesheetHoursOutcome.Error,
+                        CurrentHours = before.TotalHours,
+                        CurrentBillableHours = before.BillableHours,
+                        Message = $"SAP ha rifiutato l'aggiornamento ({response.StatusCode}): {sapMessage}",
+                    });
+                }
+
+                _logger.LogInformation(
+                    "Timesheet DocEntry {DocEntry}: ore aggiornate da {FromHours}/{FromBillableHours} a {ToHours}/{ToBillableHours} (lorde/fatturabili)",
+                    docEntry, before.TotalHours, before.BillableHours, decision.CurrentHours, decision.CurrentBillableHours);
+                return Ok(decision.ToResult());
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Nessuno legge questa risposta: il portale ha già smesso di aspettare. Conta il log, e conta che in
+                // SAP non sia partito niente.
+                _logger.LogInformation(
+                    "Timesheet DocEntry {DocEntry}: aggiornamento ore a {Hours}/{BillableHours} abbandonato dal chiamante prima della scrittura, SAP non toccato",
+                    docEntry, request.Hours, request.BillableHours);
+                return StatusCode(StatusCodes.Status499ClientClosedRequest, new TimesheetHoursUpdateResult
+                {
+                    Outcome = TimesheetHoursOutcome.Error,
+                    Message = "Richiesta abbandonata dal chiamante prima della scrittura: ore non aggiornate",
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating hours of timesheet with DocEntry {DocEntry}", docEntry);
+                return StatusCode(500, "Errore interno del server durante l'aggiornamento delle ore del timesheet");
+            }
+        }
+
+        /// <summary>
+        /// Risposta di un aggiornamento ore che non scrive, con il suo log: Warning per i rifiuti (409), Information
+        /// per il resto. <paramref name="recheck"/> dice che a fermare la scrittura è stata la rilettura dal Service
+        /// Layer subito prima del PATCH, cioè che la riga è cambiata in SAP DOPO la lettura ODBC: un caso raro, da
+        /// riconoscere nel log.
+        /// </summary>
+        private ObjectResult NoWrite(int docEntry, TimesheetHoursUpdateRequest request, TimesheetHoursDecision decision, bool recheck)
+        {
+            var when = recheck ? "alla rilettura prima della scrittura" : "sul dato letto";
+            if (decision.HttpStatus == StatusCodes.Status409Conflict)
+                _logger.LogWarning(
+                    "Timesheet DocEntry {DocEntry}: aggiornamento ore a {Hours}/{BillableHours} rifiutato {When} ({Outcome}); in SAP {CurrentHours}/{CurrentBillableHours}",
+                    docEntry, request.Hours, request.BillableHours, when, decision.Outcome, decision.CurrentHours, decision.CurrentBillableHours);
+            else
+                _logger.LogInformation(
+                    "Timesheet DocEntry {DocEntry}: aggiornamento ore a {Hours}/{BillableHours} senza scrittura {When} ({Outcome})",
+                    docEntry, request.Hours, request.BillableHours, when, decision.Outcome);
+            return StatusCode(decision.HttpStatus, decision.ToResult());
         }
 
         /// <summary>

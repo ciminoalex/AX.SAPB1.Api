@@ -432,10 +432,24 @@ namespace AX.SAPB1.Api.Services
             TimesheetCreateRequestLite request,
             ProjectLookupDetail project,
             ActivitySummary activity)
+            => BuildLitePayload(request, project, activity);
+
+        /// <summary>
+        /// Payload del Service Layer per la creazione lite. Puro (nessuno stato dell'istanza) per poterlo
+        /// verificare nei test. Le ore si ripartiscono con <see cref="Timesheets.TimesheetHoursRules.SplitHours"/>:
+        /// <c>U_TimeNrTot</c> = ore lorde, <c>U_TimeNrNet</c> = ore fatturabili (<c>BillableHours</c>, assente =
+        /// lorde) perché è la quantità che SGS fattura, <c>U_TimeNrNF</c> = la differenza. <c>U_TimeEnd</c> resta
+        /// calcolata sulle ore lorde (è il tempo lavorato), <c>U_TimeNrPa</c> e i campi <c>*Ori</c> restano a zero
+        /// come prima. Un <c>BillableHours</c> fuori da [0, Hours] lancia: i controller lo rifiutano prima con un 400.
+        /// </summary>
+        internal static TimesheetServiceLayerPayload BuildLitePayload(
+            TimesheetCreateRequestLite request,
+            ProjectLookupDetail project,
+            ActivitySummary activity)
         {
             var startTime = new TimeSpan(9, 0, 0);
             var endTime = startTime.Add(TimeSpan.FromHours(Convert.ToDouble(request.Hours ?? 0m)));
-            var hours = request.Hours ?? 0m;
+            var (hours, billable, nonBillable) = Timesheets.TimesheetHoursRules.SplitHours(request.Hours ?? 0m, request.BillableHours);
 
             return new TimesheetServiceLayerPayload
             {
@@ -451,9 +465,9 @@ namespace AX.SAPB1.Api.Services
                 U_TimeEnd = endTime.ToString(@"hh\:mm\:ss"),
                 U_TimePa = "00:00:00",
                 U_TimeNrPa = 0m,
-                U_TimeNrNF = 0m,
+                U_TimeNrNF = nonBillable,
                 U_TimeNrTot = hours,
-                U_TimeNrNet = hours,
+                U_TimeNrNet = billable,
                 U_DescExt = request.Desc,
                 U_Status = "Confermato",
                 U_ActivityId = request.ActivityId,

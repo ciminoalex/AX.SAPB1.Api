@@ -531,7 +531,8 @@ namespace AX.SAPB1.Api.Services
                         ""U_TimeNrNet"" AS ""TimeNrNet"",
                         ""U_DescExt"" AS ""DescExt"",
                         ""U_DescInt"" AS ""DescInt"",
-                        ""U_Status"" AS ""Status""
+                        ""U_Status"" AS ""Status"",
+                        ""Canceled"" AS ""Canceled""
                     FROM ""{_schema}"".""@SGS_PRJ_OTMS""
                     WHERE ""U_ResId"" = ? AND ""U_Date"" BETWEEN ? AND ?
                     ORDER BY ""U_Date"" DESC";
@@ -566,13 +567,22 @@ namespace AX.SAPB1.Api.Services
                         TimeEnd = reader.IsDBNull(16) ? null : (int)reader.GetInt16(16),
                         TimePa = reader.IsDBNull(17) ? null : (int)reader.GetInt16(17),
                         TimeNF = reader.IsDBNull(18) ? null : (int)reader.GetInt16(18),
-                        TimeNrPa = reader.IsDBNull(19) ? null : reader.GetDecimal(19),
-                        TimeNrNF = reader.IsDBNull(20) ? null : reader.GetDecimal(20),
-                        TimeNrTot = reader.IsDBNull(21) ? null : reader.GetDecimal(21),
-                        TimeNrNet = reader.IsDBNull(22) ? null : reader.GetDecimal(22),
+                        // Questa è la lettura che il portale usa per ritrovare una riga dopo un push andato in
+                        // timeout (SapB1ErpConnector.FindTimesheetAsync, confronto su TimeNrTot): le colonne ore
+                        // possono arrivare come testo, e un GetDecimal su una riga testuale vuota farebbe fallire
+                        // l'intera risposta, lasciando il portale nel "non lo so" e il push bloccato.
+                        TimeNrPa = ParseNullableHours(reader.IsDBNull(19) ? null : reader.GetValue(19)),
+                        TimeNrNF = ParseNullableHours(reader.IsDBNull(20) ? null : reader.GetValue(20)),
+                        TimeNrTot = ParseNullableHours(reader.IsDBNull(21) ? null : reader.GetValue(21)),
+                        TimeNrNet = ParseNullableHours(reader.IsDBNull(22) ? null : reader.GetValue(22)),
                         DescExt = reader.IsDBNull(23) ? null : reader.GetString(23),
                         DescInt = reader.IsDBNull(24) ? null : reader.GetString(24),
                         Status = reader.IsDBNull(25) ? null : reader.GetString(25),
+                        // Ordinale 26, in coda per non spostare gli altri. Le righe annullate NON si filtrano (la
+                        // query serve anche ad altri chiamanti): si dice quali sono, e il portale le scarta quando
+                        // cerca la riga creata da un push andato in timeout. GetValue + parser tollerante, mai
+                        // GetString: su questo impianto le colonne possono arrivare tipizzate diversamente.
+                        Canceled = ParseCanceledFlag(reader.IsDBNull(26) ? null : reader.GetValue(26)),
                     });
                 }
             }
@@ -635,7 +645,11 @@ namespace AX.SAPB1.Api.Services
         /// su questo impianto: si confronta con la stringa <c>'13'</c>, mai con un intero. <c>U_TimeNrNet</c>
         /// è testo su alcune righe: si legge con <see cref="ParseHours"/>, mai con <c>GetDecimal</c> (che
         /// fallirebbe sulle righe testuali) né con <c>Convert.ToDecimal</c> (che userebbe la cultura del
-        /// server).
+        /// server). Lo stesso vale per <c>U_TimeNrTot</c>, restituito come
+        /// <see cref="TimesheetBillingState.TotalHours"/> e letto con <see cref="ParseNullableHours"/> (assente o
+        /// illeggibile = <c>null</c>, non zero): <c>U_TimeNrNet</c> è la quantità che SGS fattura,
+        /// <c>U_TimeNrTot</c> le ore lorde, e il portale ha bisogno di entrambe per capire se una riga è stata
+        /// modificata in SAP dopo il push.
         /// </para>
         /// <para>
         /// La chiave restituita è <c>DocEntry</c>, <b>mai</b> <c>Code</c>: è quella che il portale riceve alla
@@ -668,7 +682,8 @@ namespace AX.SAPB1.Api.Services
                 var query = $@"
                     SELECT T.""DocEntry"", T.""U_Status"", T.""U_DestType"", T.""U_DestEntry"", T.""U_TimeNrNet"",
                            H.""DocNum"", H.""DocDate"",
-                           T.""U_ResId"", T.""U_Project"", T.""U_Activity"", T.""U_Date""
+                           T.""U_ResId"", T.""U_Project"", T.""U_Activity"", T.""U_Date"",
+                           T.""U_TimeNrTot""
                     FROM ""{_schema}"".""@SGS_PRJ_OTMS"" T
                     LEFT JOIN ""{_schema}"".""OINV"" H ON T.""U_DestType"" = '13' AND H.""DocEntry"" = T.""U_DestEntry""
                     WHERE T.""Canceled"" = 'N' AND T.""U_Date"" >= ? AND T.""U_Date"" <= ?
@@ -698,6 +713,11 @@ namespace AX.SAPB1.Api.Services
                         ErpProjectCode = ParseErpText(reader.IsDBNull(8) ? null : reader.GetValue(8)),
                         ErpActivityCode = ParseErpText(reader.IsDBNull(9) ? null : reader.GetValue(9)),
                         WorkedOn = ParseWorkedOn(reader.IsDBNull(10) ? null : reader.GetValue(10)),
+                        // Ordinale 11, in coda per non spostare gli altri: le ore lorde, additive nel contratto
+                        // (vedi TimesheetBillingState.TotalHours). Stessa prudenza di U_TimeNrNet: può essere testo.
+                        // Nullable: un U_TimeNrTot assente o illeggibile arriva al portale come null ("non lo so"),
+                        // mai come uno zero che sembrerebbe uno scostamento di ore.
+                        TotalHours = ParseNullableHours(reader.IsDBNull(11) ? null : reader.GetValue(11)),
                     });
                 }
             }
@@ -731,9 +751,19 @@ namespace AX.SAPB1.Api.Services
         /// "2.5" diventerebbe 25 in silenzio, e solleverebbe un'eccezione su stringa vuota facendo cadere
         /// l'intera finestra di sincronizzazione per colpa di una riga sola. Un valore illeggibile vale zero ore.
         /// </summary>
-        internal static decimal ParseHours(object? raw) => raw switch
+        internal static decimal ParseHours(object? raw) => ParseNullableHours(raw) ?? 0m;
+
+        /// <summary>
+        /// Come <see cref="ParseHours"/>, ma distingue "assente o illeggibile" (<c>null</c>) da "zero ore". Serve
+        /// dove uno zero inventato cambierebbe una decisione: nel controllo di concorrenza delle ore
+        /// (<c>PATCH /api/timesheet/{docEntry}/hours</c>) uno zero al posto di un valore illeggibile farebbe
+        /// sembrare modificata a mano una riga che non si è solo riusciti a leggere; nelle letture delle righe
+        /// (<see cref="Timesheet.TimeNrTot"/> e simili) resta <c>null</c> come prima, invece di far fallire con
+        /// <c>GetDecimal</c> l'intera risposta per una riga testuale vuota.
+        /// </summary>
+        internal static decimal? ParseNullableHours(object? raw) => raw switch
         {
-            null or DBNull => 0m,
+            null or DBNull => null,
             decimal d => d,
             double dbl => (decimal)dbl,
             float f => (decimal)f,
@@ -741,10 +771,20 @@ namespace AX.SAPB1.Api.Services
             long l => l,
             short s => s,
             _ => decimal.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim(),
-                    NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
-                 ? parsed
-                 : 0m,
+                    HoursTextStyles, CultureInfo.InvariantCulture, out var parsed)
+                 ? (decimal?)parsed
+                 : null,
         };
+
+        /// <summary>
+        /// Forma ammessa per le ore in testo: segno, punto decimale e spazi ai bordi, a cultura invariante. NON il
+        /// separatore delle migliaia (che <c>NumberStyles.Number</c> includerebbe): a cultura invariante è la virgola,
+        /// e un «6,5» scritto all'italiana diventerebbe 65 in silenzio, «0,5» diventerebbe 5. Un testo con la virgola
+        /// è quindi illeggibile (<c>null</c>): meglio "non lo so" che un numero dieci volte più grande, che nel PATCH
+        /// delle ore produrrebbe un falso <c>unchanged</c> e nel billing-state un falso scostamento.
+        /// </summary>
+        internal const NumberStyles HoursTextStyles = NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite
+            | NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint;
 
         /// <summary>
         /// Legge una colonna testuale di <c>@SGS_PRJ_OTMS</c> usata come chiave di riserva (<c>U_ResId</c>,

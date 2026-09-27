@@ -17,6 +17,19 @@ namespace AX.SAPB1.Api.Services
             ProjectLookupDetail project,
             ActivitySummary activity);
         Task<Timesheet> UpdateTimesheetAsync(TimesheetUpdateRequest request);
+
+        /// <summary>
+        /// Aggiorna SOLO le ore (<c>U_TimeNrTot</c> = <c>request.Hours</c>, <c>U_TimeNrNet</c> =
+        /// <c>request.BillableHours</c>, <c>U_TimeNrNF</c> = la differenza) della riga di timesheet con il
+        /// <c>DocEntry</c> indicato. Subito prima del PATCH rilegge la riga dal Service Layer e riesegue
+        /// <c>TimesheetHoursRules.Decide</c> con la stessa richiesta: se la riga nel frattempo è stata fatturata,
+        /// annullata o modificata in SAP (o ha già i valori chiesti) NON scrive e restituisce quella decisione.
+        /// Non scrive nemmeno se <paramref name="cancellationToken"/> è già annullato (chiamante andato via): in quel
+        /// caso lancia <see cref="OperationCanceledException"/>. Esito grezzo, non lancia su un rifiuto di SAP.
+        /// </summary>
+        Task<Timesheets.TimesheetHoursWriteResult> UpdateTimesheetHoursAsync(
+            int docEntry, TimesheetHoursUpdateRequest request, TimesheetHoursState? known, CancellationToken cancellationToken = default);
+
         Task<bool> DeleteTimesheetAsync(string code);
 
         /// <summary>

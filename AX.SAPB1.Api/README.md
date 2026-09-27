@@ -81,6 +81,12 @@ Per la fatturazione dal portale:
 - `POST /api/fiscal-projects` - nuovo progetto contabile (OPRJ) con codice dal pattern `SapB1:FiscalProjectCodePattern`
 - `GET /api/lookup/items?sellableOnly=true` - articoli di vendita attivi
 
+Per il timesheet (SGS fattura da `U_TimeNrNet`, cioè dalle ore fatturabili, non dalle lorde):
+
+- `POST /api/timesheet/lite` - crea la riga; `billableHours` facoltativo (assente = `hours`)
+- `PATCH /api/timesheet/{docEntry}/hours` - aggiorna solo ore lorde/fatturabili di una riga non fatturata, senza sovrascrivere modifiche fatte in SAP
+- `GET /api/timesheet/billing-state?from=&to=` - stato di fatturazione, con `hours` (fatturabili) e `totalHours` (lorde)
+
 Interruttori (tutti in `SapB1`, opt-in dove la scrittura non è reversibile): `SalesDocuments:AllowPostedInvoices`
 (fatture definitive), `SalesDocuments:Attachments:Enabled` (PDF in `Attachments2`), `Bootstrap:UserFields:Enabled`
 (creazione degli UDF AX.360 all'avvio). Una seconda istanza su una company di test (`SapB1:CompanyDB`) si configura
