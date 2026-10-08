@@ -1,4 +1,5 @@
 using AX.SAPB1.Api.Authentication;
+using AX.SAPB1.Api.Companies;
 using AX.SAPB1.Api.Services;
 using AX.SAPB1.Api.Services.FiscalProjects;
 using AX.SAPB1.Api.Services.SalesDocuments;
@@ -83,6 +84,11 @@ builder.Services.AddCors(options =>
               .AllowAnyMethod();
     });
 });
+
+// Company servite da questa istanza (una principale da SapB1:*, più le eventuali Companies:<id>): la company di ogni
+// richiesta la decide il login (chiave API o login utente) e viaggia nel claim "company". Vedi CompanyRegistry.
+builder.Services.AddSingleton<ICompanyRegistry, CompanyRegistry>();
+builder.Services.AddScoped<ICompanyContext, CompanyContext>();
 
 // Register custom services
 builder.Services.AddScoped<IDbOdbcService, DbOdbcService>();
@@ -192,6 +198,12 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+// Configurazione delle company validata all'avvio: con uno schema o una chiave sbagliati il servizio non parte, invece
+// di rispondere con i dati di un'altra azienda.
+var companies = app.Services.GetRequiredService<ICompanyRegistry>();
+app.Logger.LogInformation("Company servite: {Companies}", string.Join(", ", companies.Companies.Select(c =>
+    $"{c} chiavi API {c.ApiKeys.Count}{(c.ReadOnly ? ", sola lettura" : string.Empty)}")));
+
 // Configure the HTTP request pipeline (Swagger sempre attivo)
 app.UseSwagger();
 app.UseSwaggerUI(c =>
@@ -213,6 +225,22 @@ app.UseCors("AllowAngularApp");
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Ogni richiesta autenticata deve portare una company configurata, e su una company in sola lettura passano solo le
+// letture. Vedi CompanyGate.
+app.Use(async (context, next) =>
+{
+    var verdict = CompanyGate.Check(context, context.RequestServices.GetRequiredService<ICompanyRegistry>());
+    if (!verdict.Allowed)
+    {
+        context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("CompanyGate").LogWarning(
+            "Rifiutata {Method} {Path}: {Reason}", context.Request.Method, context.Request.Path, verdict.Reason);
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { error = verdict.Reason });
+        return;
+    }
+    await next();
+});
+
 // Request/response timing middleware for all incoming requests
 app.Use(async (context, next) =>
 {
@@ -220,7 +248,8 @@ app.Use(async (context, next) =>
     var sw = System.Diagnostics.Stopwatch.StartNew();
     try
     {
-        logger.LogInformation("HTTP {Method} {Path} started", context.Request.Method, context.Request.Path);
+        logger.LogInformation("HTTP {Method} {Path} started (company {Company})", context.Request.Method, context.Request.Path,
+            context.User.FindFirst(CompanyClaims.Company)?.Value ?? "-");
         await next();
         sw.Stop();
         logger.LogInformation("HTTP {Method} {Path} completed in {ElapsedMs} ms with {StatusCode}", context.Request.Method, context.Request.Path, sw.ElapsedMilliseconds, context.Response.StatusCode);

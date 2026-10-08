@@ -33,10 +33,10 @@ namespace AX.SAPB1.Api.Services
         internal const int MaxGlLinesTake = 5000;
 
         private int WriteCommandTimeoutSeconds =>
-            int.TryParse(_configuration["SapB1:Write:CommandTimeoutSeconds"], out var v) && v > 0 ? v : 120;
+            int.TryParse(_company.Current.Get("Write:CommandTimeoutSeconds"), out var v) && v > 0 ? v : 120;
 
         private int WriteMaxBatchSize =>
-            int.TryParse(_configuration["SapB1:Write:MaxBatchSize"], out var v) && v > 0 ? v : 200;
+            int.TryParse(_company.Current.Get("Write:MaxBatchSize"), out var v) && v > 0 ? v : 200;
 
         /// <summary>
         /// Il write path è <b>opt-in esplicito</b>: chiave assente o non parsabile ⇒ disattivato.
@@ -46,9 +46,13 @@ namespace AX.SAPB1.Api.Services
         /// default permissivo, il primo deploy accenderebbe la scrittura su dati contabili di produzione
         /// per pura assenza di configurazione — e nessuno lo saprebbe. Chi vuole scrivere lo dichiara.
         /// </para>
+        /// <para>
+        /// È un interruttore <b>per company</b>: la principale legge <c>SapB1:Write:Enabled</c>, una company aggiuntiva
+        /// <c>Companies:&lt;id&gt;:Write:Enabled</c> e non lo eredita mai dalla principale (vedi CompanyProfile).
+        /// </para>
         /// </summary>
         private bool WriteEnabled =>
-            bool.TryParse(_configuration["SapB1:Write:Enabled"], out var v) && v;
+            !_company.Current.ReadOnly && _company.Current.IsEnabled("Write:Enabled");
 
         // ─────────────────────────────────────────────────────────────────────
         // Lettura

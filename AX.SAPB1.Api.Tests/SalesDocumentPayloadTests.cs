@@ -256,8 +256,7 @@ public class SalesDocumentPayloadTests
         {
             var values = new Dictionary<string, string?>();
             if (value != null) values["SapB1:SalesDocuments:Attachments:Enabled"] = value;
-            return SalesDocumentService.AttachmentsEnabledIn(new ConfigurationBuilder()
-                .AddInMemoryCollection(values).Build());
+            return SalesDocumentService.AttachmentsEnabledIn(TestCompanies.Registry(values).Primary);
         }
 
         Assert.False(Enabled(null));

@@ -16,11 +16,11 @@ namespace AX.SAPB1.Api.Services
             _logger = logger;
         }
 
-        public async Task<bool> ValidateCredentialsAsync(string userName, string password, CancellationToken cancellationToken = default)
+        public async Task<bool> ValidateCredentialsAsync(string userName, string password, string companyDb, CancellationToken cancellationToken = default)
         {
             var loginData = new
             {
-                CompanyDB = _configuration["SapB1:CompanyDB"],
+                CompanyDB = companyDb,
                 UserName = userName,
                 Password = password
             };

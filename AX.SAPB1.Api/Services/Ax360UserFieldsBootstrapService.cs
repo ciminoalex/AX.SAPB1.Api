@@ -1,3 +1,5 @@
+using AX.SAPB1.Api.Companies;
+
 namespace AX.SAPB1.Api.Services
 {
     /// <summary>
@@ -11,40 +13,54 @@ namespace AX.SAPB1.Api.Services
     /// appsettings.json — altererebbe la company di produzione per pura assenza di configurazione. Chi vuole
     /// il provisioning (es. l'istanza di test su una company copiata) lo dichiara.
     /// </para>
+    /// <para>
+    /// <b>Per company.</b> L'interruttore si legge company per company (<c>SapB1:Bootstrap:UserFields:Enabled</c> per la
+    /// principale, <c>Companies:&lt;id&gt;:Bootstrap:UserFields:Enabled</c> per le aggiuntive, mai ereditato), e una
+    /// company in sola lettura non viene mai toccata, anche con l'interruttore acceso.
+    /// </para>
     /// </summary>
     public sealed class Ax360UserFieldsBootstrapService : BackgroundService
     {
         private readonly IServiceScopeFactory _scopeFactory;
-        private readonly IConfiguration _configuration;
+        private readonly ICompanyRegistry _companies;
         private readonly ILogger<Ax360UserFieldsBootstrapService> _logger;
 
         public Ax360UserFieldsBootstrapService(
             IServiceScopeFactory scopeFactory,
-            IConfiguration configuration,
+            ICompanyRegistry companies,
             ILogger<Ax360UserFieldsBootstrapService> logger)
         {
             _scopeFactory = scopeFactory;
-            _configuration = configuration;
+            _companies = companies;
             _logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            if (!(bool.TryParse(_configuration["SapB1:Bootstrap:UserFields:Enabled"], out var enabled) && enabled))
+            foreach (var company in _companies.Companies)
             {
-                _logger.LogInformation("Provisioning UDF AX.360 all'avvio disattivato (SapB1:Bootstrap:UserFields:Enabled non è true): metadati SAP non toccati.");
-                return;
-            }
+                if (!company.IsEnabled("Bootstrap:UserFields:Enabled"))
+                {
+                    _logger.LogInformation("Provisioning UDF AX.360 all'avvio disattivato per la company {Company}: metadati SAP non toccati.", company);
+                    continue;
+                }
+                if (company.ReadOnly)
+                {
+                    _logger.LogWarning("Provisioning UDF AX.360 chiesto per la company {Company}, che è in sola lettura: ignorato.", company);
+                    continue;
+                }
 
-            try
-            {
-                using var scope = _scopeFactory.CreateScope();
-                var sl = scope.ServiceProvider.GetRequiredService<ISapB1ServiceLayerService>();
-                await sl.EnsureAx360UserFieldsAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Provisioning UDF AX.360 all'avvio non completato (verrà ritentato al prossimo riavvio).");
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    using var _ = scope.ServiceProvider.GetRequiredService<ICompanyContext>().Use(company);
+                    var sl = scope.ServiceProvider.GetRequiredService<ISapB1ServiceLayerService>();
+                    await sl.EnsureAx360UserFieldsAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Provisioning UDF AX.360 all'avvio non completato per la company {Company} (verrà ritentato al prossimo riavvio).", company);
+                }
             }
         }
     }

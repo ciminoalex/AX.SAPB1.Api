@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using AX.SAPB1.Api.Companies;
 using AX.SAPB1.Api.Models;
 
 namespace AX.SAPB1.Api.Services
@@ -19,11 +20,12 @@ namespace AX.SAPB1.Api.Services
         private readonly IMemoryCache _memoryCache;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ICredentialStore _credentialStore;
+        private readonly ICompanyContext _company;
         private const string ServiceAccountCacheKey = "service-account";
         private string? _sessionId;
         private static readonly SemaphoreSlim _loginLock = new SemaphoreSlim(1, 1);
 
-        public SapB1ServiceLayerService(HttpClient httpClient, IConfiguration configuration, ILogger<SapB1ServiceLayerService> logger, IDbOdbcService dbOdbcService, IMemoryCache memoryCache, IHttpContextAccessor httpContextAccessor, ICredentialStore credentialStore)
+        public SapB1ServiceLayerService(HttpClient httpClient, IConfiguration configuration, ILogger<SapB1ServiceLayerService> logger, IDbOdbcService dbOdbcService, IMemoryCache memoryCache, IHttpContextAccessor httpContextAccessor, ICredentialStore credentialStore, ICompanyContext company)
         {
             _httpClient = httpClient;
             _configuration = configuration;
@@ -32,6 +34,7 @@ namespace AX.SAPB1.Api.Services
             _memoryCache = memoryCache;
             _httpContextAccessor = httpContextAccessor;
             _credentialStore = credentialStore;
+            _company = company;
             
             var baseUrl = configuration["SapB1:ServiceLayerUrl"] 
                 ?? throw new ArgumentNullException(nameof(configuration), "SapB1:ServiceLayerUrl not found");
@@ -113,8 +116,8 @@ namespace AX.SAPB1.Api.Services
 
                 if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password))
                 {
-                    userName = _configuration["SapB1:UserName"];
-                    password = _configuration["SapB1:Password"];
+                    userName = _company.Current.Get("UserName");
+                    password = _company.Current.Get("Password");
                 }
 
                 if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password))
@@ -124,7 +127,7 @@ namespace AX.SAPB1.Api.Services
 
                 var loginData = new
                 {
-                    CompanyDB = _configuration["SapB1:CompanyDB"],
+                    CompanyDB = _company.Current.CompanyDB,
                     UserName = userName,
                     Password = password
                 };
@@ -156,7 +159,7 @@ namespace AX.SAPB1.Api.Services
                         _httpClient.DefaultRequestHeaders.Add("Cookie", cookieString);
 
                         CacheSession(userKey, cookieString, _sessionId);
-                        _logger.LogInformation("Successfully logged in to SAP B1 Service Layer for user {UserKey}", userKey);
+                        _logger.LogInformation("Successfully logged in to SAP B1 Service Layer for user {UserKey} on company {Company}", userKey, _company.Current);
                         return _sessionId;
                     }
                 }
@@ -201,7 +204,7 @@ namespace AX.SAPB1.Api.Services
         private void CacheSession(string userKey, string cookieString, string sessionId)
         {
             var defaultMinutes = 25; // fallback in caso non configurato
-            var ttlMinutesConfig = _configuration["SapB1:SessionTimeoutMinutes"];
+            var ttlMinutesConfig = _company.Current.Get("SessionTimeoutMinutes");
             if (!int.TryParse(ttlMinutesConfig, out int ttlMinutes))
             {
                 ttlMinutes = defaultMinutes;
@@ -704,8 +707,8 @@ namespace AX.SAPB1.Api.Services
                 // Le fatture sono sempre registrate come documento per articoli (dDocument_Items).
                 // Le righe prive di ErpItemCode (tipicamente Time & Materials, calcolate da ore x tariffa)
                 // usano il codice articolo configurato in SapB1:TimeAndMaterialsItemCode.
-                var tmItemCode = _configuration["SapB1:TimeAndMaterialsItemCode"];
-                var defaultVatGroup = _configuration["SapB1:DefaultVatGroup"];
+                var tmItemCode = _company.Current.Get("TimeAndMaterialsItemCode");
+                var defaultVatGroup = _company.Current.Get("DefaultVatGroup");
 
                 if (string.IsNullOrWhiteSpace(tmItemCode) && dto.Lines.Any(l => string.IsNullOrWhiteSpace(l.ErpItemCode)))
                 {
@@ -912,9 +915,13 @@ namespace AX.SAPB1.Api.Services
             return user?.FindFirstValue("jti") ?? user?.FindFirstValue(ClaimTypes.NameIdentifier);
         }
 
-        private (string cookieKey, string sessionKey) GetCacheKeys(string userKey)
-        {
-            return ($"SapB1:SessionCookie:{userKey}", $"SapB1:SessionId:{userKey}");
-        }
+        /// <summary>
+        /// Chiavi della sessione in cache: per company E per utente. Una sessione del Service Layer è aperta su UNA
+        /// CompanyDB; condividerla fra company farebbe scrivere nello schema di un'altra azienda.
+        /// </summary>
+        private (string cookieKey, string sessionKey) GetCacheKeys(string userKey) => CacheKeysFor(_company.Current.Id, userKey);
+
+        internal static (string cookieKey, string sessionKey) CacheKeysFor(string companyId, string userKey) =>
+            ($"SapB1:SessionCookie:{companyId}:{userKey}", $"SapB1:SessionId:{companyId}:{userKey}");
     }
 }
