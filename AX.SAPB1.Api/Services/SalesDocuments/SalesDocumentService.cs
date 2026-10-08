@@ -1,3 +1,4 @@
+using AX.SAPB1.Api.Companies;
 using AX.SAPB1.Api.Models;
 using AX.SAPB1.Api.Support;
 
@@ -49,17 +50,20 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         private readonly ISapB1ServiceLayerService _sl;
         private readonly IConfiguration _configuration;
         private readonly ILogger<SalesDocumentService> _logger;
+        private readonly ICompanyContext _company;
 
         public SalesDocumentService(
             IDbOdbcService db,
             ISapB1ServiceLayerService sl,
             IConfiguration configuration,
-            ILogger<SalesDocumentService> logger)
+            ILogger<SalesDocumentService> logger,
+            ICompanyContext company)
         {
             _db = db;
             _sl = sl;
             _configuration = configuration;
             _logger = logger;
+            _company = company;
         }
 
         /// <summary>
@@ -68,8 +72,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// deploy.ps1 non copia appsettings.json, quindi un server non configurato resta nel default sicuro.
         /// Bozze e ordini (annullabili) non sono soggetti al flag.
         /// </summary>
-        private bool AllowPostedInvoices =>
-            bool.TryParse(_configuration["SapB1:SalesDocuments:AllowPostedInvoices"], out var v) && v;
+        private bool AllowPostedInvoices => _company.Current.IsEnabled("SalesDocuments:AllowPostedInvoices");
 
         /// <summary>
         /// Allegati: opt-in esplicito, chiave assente o non booleana ⇒ spenti, come gli altri interruttori di
@@ -79,10 +82,10 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// documenti senza PDF e lo dice in <c>attachmentError</c>. <c>true</c> va scritto solo sull'istanza di
         /// produzione (o su una di test la cui cartella allegati è stata separata).
         /// </summary>
-        internal static bool AttachmentsEnabledIn(IConfiguration configuration) =>
-            bool.TryParse(configuration["SapB1:SalesDocuments:Attachments:Enabled"], out var v) && v;
+        internal static bool AttachmentsEnabledIn(CompanyProfile company) =>
+            company.IsEnabled("SalesDocuments:Attachments:Enabled");
 
-        private bool AttachmentsEnabled => AttachmentsEnabledIn(_configuration);
+        private bool AttachmentsEnabled => AttachmentsEnabledIn(_company.Current);
 
         public async Task<SalesDocumentOutcome> CreateAsync(SalesDocumentRequest request)
         {

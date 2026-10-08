@@ -1,5 +1,6 @@
 using System.Data.Odbc;
 using System.Globalization;
+using AX.SAPB1.Api.Companies;
 using AX.SAPB1.Api.Models;
 using Microsoft.AspNetCore.Http;
 using System.IdentityModel.Tokens.Jwt;
@@ -21,23 +22,26 @@ namespace AX.SAPB1.Api.Services
         // cambiare se la derivazione cambia.
         private const string FiscalProjectCodeExpression = @"COALESCE(NULLIF(T.""FIPROJECT"", ''), T.""U_SGS_PRJ_PrjCode"")";
 
-        private readonly string _connectionString;
-        private readonly string _schema;
+        private readonly ICompanyContext _company;
         private readonly IConfiguration _configuration;
         private readonly ILogger<DbOdbcService> _logger;
         private readonly IHttpContextAccessor _httpContextAccessor;
 
-        public DbOdbcService(IConfiguration configuration, ILogger<DbOdbcService> logger, IHttpContextAccessor httpContextAccessor)
+        // Schema e connessione sono quelli della company della richiesta (claim al login, vedi ICompanyContext), letti
+        // a ogni uso e mai fissati nel costruttore: una company non risolta fa fallire la query invece di ripiegare
+        // sullo schema principale.
+        private string _schema => _company.Current.CompanyDB;
+        private string _connectionString => _company.Current.ConnectionString;
+
+        /// <summary>Lo schema su cui lavora questa istanza (per i test sull'isolamento fra company).</summary>
+        internal string CurrentSchema => _schema;
+
+        public DbOdbcService(IConfiguration configuration, ILogger<DbOdbcService> logger, IHttpContextAccessor httpContextAccessor, ICompanyContext company)
         {
-            _connectionString = configuration.GetConnectionString("DefaultDatabase")
-                ?? throw new ArgumentNullException(nameof(configuration), "DefaultDatabase connection string not found");
-
-            _schema = configuration["SapB1:CompanyDB"]
-                ?? throw new ArgumentNullException(nameof(configuration), "Schema not defined");
-
             _configuration = configuration;
             _logger = logger;
             _httpContextAccessor = httpContextAccessor;
+            _company = company;
         }
 
         private async Task<OdbcConnection> CreateOpenConnectionAsync()

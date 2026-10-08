@@ -352,10 +352,10 @@ Serve a collaudare la fatturazione dal portale (documenti di vendita, ordini, pr
 della company, senza toccare la produzione. È un **secondo servizio Windows**, con la sua cartella e il suo
 `appsettings.json`: la stessa build, nessuna modifica al codice.
 
-**Perché un processo separato e non un parametro.** La company si sceglie con una sola chiave,
-`SapB1:CompanyDB`, che pilota sia il Login del Service Layer sia lo schema di TUTTE le query ODBC (ogni tabella è
-qualificata come `"<CompanyDB>"."OINV"`, nessuno schema è scritto nel codice). La cache della sessione Service
-Layer però è per utente, non per company: un processo serve una company sola.
+**Perché un processo separato.** Dal multi-company (§12) un processo può servire più company, ma la copia di
+test resta in un servizio a parte per scelta: chiavi, `Jwt:Key` e interruttori di scrittura della prova non devono
+poter raggiungere la produzione nemmeno per un errore di configurazione. Le company *vere* in sola lettura (es.
+HTDI per la reportistica) si aggiungono invece al servizio esistente, come in §12.
 
 **Prerequisiti sulla company copiata** (lato SAP, prima di avviare l'istanza):
 - la copia deve essere registrata in `SBOCOMMON` (copia/ripristino con gli strumenti SAP B1): copiare lo schema
@@ -445,3 +445,48 @@ un endpoint `Https` dedicato, oppure verificare a mano (`http://<server>:5012/sw
    servizio precedente ignora il campo e scrive `U_TimeNrNet = hours` (vedi `API-ENDPOINTS.md`, "Ordine di
    rilascio"). Prima del rilascio va anche deciso il punto aperto sui campi orari (`U_TimeNF`/`U_TimeEnd`), stessa
    sezione.
+
+### 12) Più company su un solo servizio (es. HTDI)
+
+Un solo processo serve più company SAP B1 dello stesso server HANA/Service Layer. **La company la decide il login**:
+- **portale AX.360** (chiave API, header `X-Api-Key`): ogni chiave appartiene a UNA company; il tenant del portale
+  entra con la sua chiave e vede solo il suo schema;
+- **login utente** (`POST /api/auth/login`): il corpo porta anche `"company": "htdi"`; assente = company principale.
+
+La company scelta viaggia nel claim `company` e da lì la leggono tutte le query ODBC (schema), il Login e la cache
+delle sessioni del Service Layer (per company E per utente) e gli interruttori. Una richiesta autenticata senza una
+company configurata riceve **403**: non c'è mai un ripiego sulla principale.
+
+**La configurazione storica resta valida così com'è**: `SapB1:*`, `Auth:ApiKeys` e
+`ConnectionStrings:DefaultDatabase` descrivono la *company principale* (id `default`, o `SapB1:CompanyId`). Le
+company aggiuntive si dichiarano in `Companies`, accanto:
+
+```json
+{
+  "Companies": {
+    "htdi": {
+      "CompanyDB": "SBOHITECH_PROD",
+      "ApiKeys": [ "<chiave API dedicata a HTDI, diversa da tutte le altre>" ],
+      "ConnectionString": "(opzionale) Driver={HDBODBC};ServerNode=<hana-host>:30015;UID=<utente in sola lettura>;PWD=<password>;"
+    }
+  }
+}
+```
+
+Regole:
+- **Una company aggiuntiva nasce in sola lettura**: passano solo GET e `POST /api/gl/lines/by-entry-ids`; timesheet,
+  documenti di vendita, progetti contabili e attribuzioni rispondono 403. Si apre solo con `"AllowWrites": true`
+  nella sua sezione (e anche allora ogni scrittura ha il suo interruttore: `Write:Enabled`,
+  `SalesDocuments:AllowPostedInvoices`, `Bootstrap:UserFields:Enabled`…).
+- **Dalla principale si ereditano solo** `UserName`, `Password`, `SessionTimeoutMinutes`,
+  `Write:CommandTimeoutSeconds`, `Write:MaxBatchSize`. Tutto il resto (interruttori, `TimeAndMaterialsItemCode`,
+  `DefaultVatGroup`, `FiscalProjectCodePattern`…) va scritto nella sezione della company: una chiave dimenticata
+  lascia la funzione spenta, non la accende con il valore di un'altra azienda.
+- `ConnectionString` assente = quella della principale: l'utenza HANA deve poter leggere anche il nuovo schema.
+  Meglio un'utenza dedicata in sola lettura (`SELECT` sullo schema).
+- `ServiceLayerUrl` è unico per tutto il servizio: le company devono stare sullo stesso Service Layer.
+- Errori di configurazione (schema mancante, stesso schema due volte, stessa chiave API su due company, id già
+  usato) **fermano l'avvio**: il log dell'avvio elenca le company servite.
+- I token JWT emessi prima di questa versione non portano il claim `company`: rispondono 403 finché non si rifà il
+  login (durano al massimo `Jwt:ExpiresMinutes`). La chiave API del portale non ne risente.
+

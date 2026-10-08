@@ -150,7 +150,8 @@ public class SalesDocumentStateTests
         }
 
         public SalesDocumentService Service()
-            => new(Db(), ServiceLayer(), new ConfigurationBuilder().Build(), NullLogger<SalesDocumentService>.Instance);
+            => new(Db(), ServiceLayer(), new ConfigurationBuilder().Build(), NullLogger<SalesDocumentService>.Instance,
+                TestCompanies.Fixed(TestCompanies.Registry().Primary));
     }
 
     private static SalesDocumentRequest Request(string correlationId) => new()

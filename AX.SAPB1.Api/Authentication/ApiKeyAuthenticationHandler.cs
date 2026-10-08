@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
+using AX.SAPB1.Api.Companies;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
 
@@ -11,23 +12,26 @@ namespace AX.SAPB1.Api.Authentication
     /// (vedi policy combinata in Program.cs): un endpoint è accessibile con JWT valido
     /// OPPURE con una chiave API valida.
     ///
-    /// Le chiavi accettate sono configurate in <c>Auth:ApiKeys</c> (array) o <c>Auth:ApiKey</c> (singola).
+    /// <para><b>La chiave è il login del portale: decide la company.</b> Ogni chiave appartiene a una sola company
+    /// (<c>Auth:ApiKeys</c> per la principale, <c>Companies:&lt;id&gt;:ApiKeys</c> per le aggiuntive, vedi
+    /// <see cref="CompanyRegistry"/>) e finisce nel claim <see cref="CompanyClaims.Company"/>: ogni tenant del portale
+    /// entra con la sua chiave e vede solo il suo schema.</para>
     /// </summary>
     public sealed class ApiKeyAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
     {
         public const string SchemeName = "ApiKey";
         public const string HeaderName = "X-Api-Key";
 
-        private readonly IConfiguration _configuration;
+        private readonly ICompanyRegistry _companies;
 
         public ApiKeyAuthenticationHandler(
             IOptionsMonitor<AuthenticationSchemeOptions> options,
             ILoggerFactory logger,
             UrlEncoder encoder,
-            IConfiguration configuration)
+            ICompanyRegistry companies)
             : base(options, logger, encoder)
         {
-            _configuration = configuration;
+            _companies = companies;
         }
 
         protected override Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -36,50 +40,27 @@ namespace AX.SAPB1.Api.Authentication
             if (!Request.Headers.TryGetValue(HeaderName, out var provided) || string.IsNullOrWhiteSpace(provided))
                 return Task.FromResult(AuthenticateResult.NoResult());
 
-            var presented = provided.ToString().Trim();
-            var allowed = GetConfiguredKeys();
-
-            if (allowed.Count == 0)
+            if (_companies.Companies.All(c => c.ApiKeys.Count == 0))
             {
-                Logger.LogWarning("X-Api-Key presentato ma nessuna chiave configurata in Auth:ApiKeys/Auth:ApiKey.");
+                Logger.LogWarning("X-Api-Key presentato ma nessuna chiave configurata (Auth:ApiKeys / Companies:<id>:ApiKeys).");
                 return Task.FromResult(AuthenticateResult.Fail("Nessuna chiave API configurata."));
             }
 
-            // Confronto a tempo costante per evitare timing attack.
-            var match = allowed.Any(k => CryptographicEquals(k, presented));
-            if (!match)
+            // Confronto a tempo costante, su tutte le chiavi di tutte le company.
+            var company = _companies.FindByApiKey(provided.ToString());
+            if (company == null)
                 return Task.FromResult(AuthenticateResult.Fail("Chiave API non valida."));
 
             var claims = new[]
             {
                 new Claim(ClaimTypes.Name, "ax360-erp"),
                 new Claim("client_type", "api_key"),
+                new Claim(CompanyClaims.Company, company.Id),
             };
             var identity = new ClaimsIdentity(claims, SchemeName);
             var principal = new ClaimsPrincipal(identity);
             var ticket = new AuthenticationTicket(principal, SchemeName);
             return Task.FromResult(AuthenticateResult.Success(ticket));
-        }
-
-        private List<string> GetConfiguredKeys()
-        {
-            var keys = new List<string>();
-
-            var single = _configuration["Auth:ApiKey"];
-            if (!string.IsNullOrWhiteSpace(single)) keys.Add(single.Trim());
-
-            var multi = _configuration.GetSection("Auth:ApiKeys").Get<string[]>();
-            if (multi != null)
-                keys.AddRange(multi.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()));
-
-            return keys.Distinct().ToList();
-        }
-
-        private static bool CryptographicEquals(string a, string b)
-        {
-            var ba = System.Text.Encoding.UTF8.GetBytes(a);
-            var bb = System.Text.Encoding.UTF8.GetBytes(b);
-            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ba, bb);
         }
     }
 }

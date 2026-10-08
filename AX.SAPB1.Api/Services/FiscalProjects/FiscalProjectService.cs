@@ -1,4 +1,5 @@
 using System.Globalization;
+using AX.SAPB1.Api.Companies;
 using AX.SAPB1.Api.Models;
 using AX.SAPB1.Api.Services.SalesDocuments;
 
@@ -56,13 +57,15 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
         private readonly ISapB1ServiceLayerService _sl;
         private readonly IConfiguration _configuration;
         private readonly ILogger<FiscalProjectService> _logger;
+        private readonly ICompanyContext _company;
 
-        public FiscalProjectService(IDbOdbcService db, ISapB1ServiceLayerService sl, IConfiguration configuration, ILogger<FiscalProjectService> logger)
+        public FiscalProjectService(IDbOdbcService db, ISapB1ServiceLayerService sl, IConfiguration configuration, ILogger<FiscalProjectService> logger, ICompanyContext company)
         {
             _db = db;
             _sl = sl;
             _configuration = configuration;
             _logger = logger;
+            _company = company;
         }
 
         public async Task<FiscalProjectOutcome> CreateAsync(FiscalProjectCreateRequest request)
@@ -79,11 +82,12 @@ namespace AX.SAPB1.Api.Services.FiscalProjects
             FiscalProjectCodePattern pattern;
             try
             {
-                pattern = FiscalProjectCodePattern.Parse(_configuration["SapB1:FiscalProjectCodePattern"]);
+                // Lo schema dei codici è della company (MTF: PRJ26_…, HTDI: H2026_…): mai ereditato da un'altra.
+                pattern = FiscalProjectCodePattern.Parse(_company.Current.Get("FiscalProjectCodePattern"));
             }
             catch (ArgumentException ex)
             {
-                return Fail(500, $"SapB1:FiscalProjectCodePattern non valido: {ex.Message}");
+                return Fail(500, $"FiscalProjectCodePattern non valido per la company {_company.Current.Id}: {ex.Message}");
             }
 
             var validFrom = (request.ValidFrom ?? DateTime.Today).Date;

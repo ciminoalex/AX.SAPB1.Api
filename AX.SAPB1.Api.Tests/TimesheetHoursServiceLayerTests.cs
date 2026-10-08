@@ -70,17 +70,17 @@ public class TimesheetHoursServiceLayerTests
 
     private static SapB1ServiceLayerService Service(FakeServiceLayer handler)
     {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["SapB1:ServiceLayerUrl"] = "https://sl.test/b1s/v1/" })
-            .Build();
+        var configuration = TestCompanies.Config();
+        var company = new AX.SAPB1.Api.Companies.CompanyRegistry(configuration).Primary;
         // Sessione già in cache per l'account di servizio: il login non fa parte di questi test.
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set("SapB1:SessionCookie:service-account", "B1SESSION=test");
-        cache.Set("SapB1:SessionId:service-account", "test");
+        var (cookieKey, sessionKey) = SapB1ServiceLayerService.CacheKeysFor(company.Id, "service-account");
+        cache.Set(cookieKey, "B1SESSION=test");
+        cache.Set(sessionKey, "test");
         return new SapB1ServiceLayerService(
             new HttpClient(handler), configuration, NullLogger<SapB1ServiceLayerService>.Instance,
             InterfaceFake<IDbOdbcService>.Create(new()), cache, new HttpContextAccessor(),
-            InterfaceFake<ICredentialStore>.Create(new()));
+            InterfaceFake<ICredentialStore>.Create(new()), TestCompanies.Fixed(company));
     }
 
     private static TimesheetHoursUpdateRequest Request(decimal? expHours = 6.5m, decimal? expBillable = 6.5m)
