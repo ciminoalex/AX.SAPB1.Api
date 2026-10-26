@@ -1326,6 +1326,38 @@ namespace AX.SAPB1.Api.Services
         }
 
         /// <summary>
+        /// Quali campi AX.360 hanno le tabelle lette dal feed fatture. Se i metadati non sono leggibili si
+        /// tiene il comportamento storico, cioè tutti presenti: meglio un errore SQL esplicito su una company
+        /// strana che perdere in silenzio tipo documento e categoria di ricavo sulla company di MTF.
+        /// </summary>
+        private async Task<InvoiceQueries.Ax360Fields> ResolveInvoiceAx360FieldsAsync(string headerTable, string lineTable, bool isCreditNote)
+        {
+            try
+            {
+                var header = isCreditNote ? new HashSet<string>() : await GetUserFieldColumnsAsync(headerTable);
+                var lines = await GetUserFieldColumnsAsync(lineTable);
+                var items = await GetUserFieldColumnsAsync("OITM");
+                var accounts = await GetUserFieldColumnsAsync("OACT");
+                var fields = new InvoiceQueries.Ax360Fields(
+                    header.Contains(Ax360Udf.Col(Ax360Udf.InvId)),
+                    header.Contains(Ax360Udf.Col(Ax360Udf.DocType)),
+                    lines.Contains(Ax360Udf.Col(Ax360Udf.RevCat)),
+                    items.Contains(Ax360Udf.Col(Ax360Udf.RevCat)),
+                    accounts.Contains(Ax360Udf.Col(Ax360Udf.RevCat)));
+                var missing = !fields.LineRevCat || !fields.ItemRevCat || !fields.AccountRevCat
+                    || (!isCreditNote && (!fields.HeaderInvId || !fields.HeaderDocType));
+                if (missing)
+                    _logger.LogInformation("Feed fatture su {Schema}.{Table}: campi AX.360 assenti, letti come NULL ({Fields}).", _schema, headerTable, fields);
+                return fields;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Campi utente di {Schema}.{Table} non verificabili: si assumono presenti i campi AX.360.", _schema, headerTable);
+                return InvoiceQueries.Ax360Fields.All;
+            }
+        }
+
+        /// <summary>
         /// Legge un blocco di documenti A/R (testate + righe + scadenzario + date incasso) da una coppia di
         /// tabelle SAP B1 omologhe: OINV/INV1/INV6 (fatture) oppure ORIN/RIN1/RIN6 (note di credito). Per le
         /// note di credito (<paramref name="isCreditNote"/>) tutti gli importi sono restituiti con segno negativo.
@@ -1337,30 +1369,20 @@ namespace AX.SAPB1.Api.Services
             var invoices = new Dictionary<int, ErpInvoiceDto>();
             var sign = isCreditNote ? -1m : 1m;
 
-            // Gli UDF di correlazione AX.360 (U_AX360_InvId/DocType) sono provvisti SOLO su OINV/ODRF
-            // (vedi EnsureAx360UserFieldsAsync), non su ORIN: le note di credito non nascono mai da una
-            // bozza spinta da AX, quindi per le NC NON selezioniamo quelle colonne (non esistono su ORIN
-            // e farebbero fallire l'intera query, rompendo anche il sync delle fatture).
-            var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
-            var udfDocType = Ax360Udf.Col(Ax360Udf.DocType);
-            var udfSelect = isCreditNote ? string.Empty : $@", T.""{udfInvId}"", T.""{udfDocType}""";
+            // Le note di credito non selezionano gli UDF di correlazione (U_AX360_InvId/DocType): non nascono
+            // mai da una bozza spinta da AX, e su ORIN il bootstrap non li crea. Sulle fatture ogni campo
+            // AX.360 si seleziona solo se la company lo ha (vedi InvoiceQueries): una company servita in sola
+            // lettura non li riceve mai, e una colonna assente farebbe fallire l'intera query.
+            var fields = await ResolveInvoiceAx360FieldsAsync(headerTable, lineTable, isCreditNote);
             // Watermark incrementale: filtra per data di ULTIMA MODIFICA (UpdateDate), non per data di
             // emissione (DocDate). Quando in SAP B1 si applica un incasso, il documento viene aggiornato
             // (cambia PaidToDate) e UpdateDate avanza: filtrando su UpdateDate il sync incrementale
             // rivede i documenti saldati e propaga lo stato di pagamento. Filtrando su DocDate, invece,
             // un incasso su un documento già emesso non rientrerebbe MAI nel fetch incrementale e lo stato
             // resterebbe congelato a "aperto/scaduto" per sempre.
-            var sinceClause = since.HasValue ? @"WHERE T.""UpdateDate"" >= ?" : string.Empty;
 
             // 1) Testate
-            var headerQuery = $@"
-                SELECT
-                    T.""DocEntry"", T.""DocNum"", T.""CardCode"",
-                    T.""DocDate"", T.""DocDueDate"", T.""DocCur"",
-                    T.""DocTotal"", T.""VatSum"", T.""PaidToDate"", T.""Comments""{udfSelect}
-                FROM ""{_schema}"".""{headerTable}"" T
-                {sinceClause}
-                ORDER BY T.""DocDate"", T.""DocEntry""";
+            var headerQuery = InvoiceQueries.BuildHeaderQuery(_schema, headerTable, isCreditNote, since.HasValue, fields);
 
             using (var command = new OdbcCommand(headerQuery, connection))
             {
@@ -1402,22 +1424,7 @@ namespace AX.SAPB1.Api.Services
             //    con precedenza alla RIGA documento (consente di classificare per singola riga gli
             //    articoli "contenitore"/generici), poi fallback all'anagrafica articolo (OITM) per le
             //    righe a articolo e al conto contabile (OACT) per le righe di servizio (ItemCode vuoto).
-            var udfRevCat = Ax360Udf.Col(Ax360Udf.RevCat); // "U_AX360_RevCat"
-            var lineQuery = $@"
-                SELECT
-                    L.""DocEntry"", L.""LineNum"", L.""ItemCode"", L.""Dscription"",
-                    L.""Quantity"", L.""Price"", L.""LineTotal"", L.""VatPrcnt"", L.""GTotal"",
-                    COALESCE(
-                        NULLIF(L.""{udfRevCat}"", ''),
-                        CASE WHEN L.""ItemCode"" IS NOT NULL AND L.""ItemCode"" <> ''
-                             THEN ITM.""{udfRevCat}""
-                             ELSE ACT.""{udfRevCat}"" END) AS ""RevenueCategory""
-                FROM ""{_schema}"".""{lineTable}"" L
-                INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = L.""DocEntry""
-                LEFT JOIN ""{_schema}"".""OITM"" ITM ON ITM.""ItemCode"" = L.""ItemCode""
-                LEFT JOIN ""{_schema}"".""OACT"" ACT ON ACT.""AcctCode"" = L.""AcctCode""
-                {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
-                ORDER BY L.""DocEntry"", L.""LineNum""";
+            var lineQuery = InvoiceQueries.BuildLineQuery(_schema, headerTable, lineTable, since.HasValue, fields);
 
             using (var command = new OdbcCommand(lineQuery, connection))
             {
