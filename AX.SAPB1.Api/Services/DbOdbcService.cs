@@ -1374,19 +1374,17 @@ namespace AX.SAPB1.Api.Services
             // AX.360 si seleziona solo se la company lo ha (vedi InvoiceQueries): una company servita in sola
             // lettura non li riceve mai, e una colonna assente farebbe fallire l'intera query.
             var fields = await ResolveInvoiceAx360FieldsAsync(headerTable, lineTable, isCreditNote);
-            // Watermark incrementale: filtra per data di ULTIMA MODIFICA (UpdateDate), non per data di
-            // emissione (DocDate). Quando in SAP B1 si applica un incasso, il documento viene aggiornato
-            // (cambia PaidToDate) e UpdateDate avanza: filtrando su UpdateDate il sync incrementale
-            // rivede i documenti saldati e propaga lo stato di pagamento. Filtrando su DocDate, invece,
-            // un incasso su un documento già emesso non rientrerebbe MAI nel fetch incrementale e lo stato
-            // resterebbe congelato a "aperto/scaduto" per sempre.
+            // Watermark incrementale: documenti modificati (UpdateDate) oppure riconciliati (OITR) dal
+            // watermark, mai per data di emissione. Un incasso NON avanza UpdateDate della fattura che
+            // salda: senza le riconciliazioni il documento pagato non rientrerebbe mai nel delta e resterebbe
+            // "scaduto" nel portale per sempre. Il perché, misurato, sta su InvoiceQueries.SinceFilter.
 
             // 1) Testate
             var headerQuery = InvoiceQueries.BuildHeaderQuery(_schema, headerTable, isCreditNote, since.HasValue, fields);
 
             using (var command = new OdbcCommand(headerQuery, connection))
             {
-                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                AddSinceParameters(command, since);
                 using var reader = await command.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
@@ -1428,7 +1426,7 @@ namespace AX.SAPB1.Api.Services
 
             using (var command = new OdbcCommand(lineQuery, connection))
             {
-                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                AddSinceParameters(command, since);
                 using var reader = await command.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
@@ -1458,20 +1456,21 @@ namespace AX.SAPB1.Api.Services
             // scadenzario. Non incide sullo stato (calcolato dal portale su importi/scadenza):
             // è isolato in un try/catch così che, se lo schema di riconciliazione differisse su
             // questa company, PaidAt resti null senza rompere il mirror finanziario.
+            // In RCT2 il documento saldato è DocEntry; InvoiceId è solo il numero di riga dell'incasso (0, 1, 2…).
             var paidAtByInst = new Dictionary<(int DocEntry, int InstId), DateTime>();
             try
             {
                 var paidAtQuery = $@"
-                    SELECT R.""InvoiceId"", R.""InstId"", MAX(P.""DocDate"") AS ""PaidAt""
+                    SELECT R.""DocEntry"", R.""InstId"", MAX(P.""DocDate"") AS ""PaidAt""
                     FROM ""{_schema}"".""RCT2"" R
                     INNER JOIN ""{_schema}"".""ORCT"" P ON P.""DocEntry"" = R.""DocNum""
-                    INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = R.""InvoiceId""
+                    INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = R.""DocEntry""
                     WHERE R.""InvType"" = {invType} AND P.""Canceled"" = 'N'
-                    {(since.HasValue ? @"AND H.""UpdateDate"" >= ?" : string.Empty)}
-                    GROUP BY R.""InvoiceId"", R.""InstId""";
+                    {(since.HasValue ? $"AND {InvoiceQueries.SinceFilter(_schema, headerTable, "H")}" : string.Empty)}
+                    GROUP BY R.""DocEntry"", R.""InstId""";
 
                 using var paidAtCommand = new OdbcCommand(paidAtQuery, connection);
-                if (since.HasValue) paidAtCommand.Parameters.AddWithValue("@Since", since.Value);
+                AddSinceParameters(paidAtCommand, since);
                 using var paidAtReader = await paidAtCommand.ExecuteReaderAsync();
                 while (await paidAtReader.ReadAsync())
                 {
@@ -1491,12 +1490,12 @@ namespace AX.SAPB1.Api.Services
                     I.""DocEntry"", I.""InstlmntID"", I.""DueDate"", I.""InsTotal"", I.""PaidToDate""
                 FROM ""{_schema}"".""{instTable}"" I
                 INNER JOIN ""{_schema}"".""{headerTable}"" H ON H.""DocEntry"" = I.""DocEntry""
-                {(since.HasValue ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
+                {(since.HasValue ? $"WHERE {InvoiceQueries.SinceFilter(_schema, headerTable, "H")}" : string.Empty)}
                 ORDER BY I.""DocEntry"", I.""InstlmntID""";
 
             using (var command = new OdbcCommand(instQuery, connection))
             {
-                if (since.HasValue) command.Parameters.AddWithValue("@Since", since.Value);
+                AddSinceParameters(command, since);
                 using var reader = await command.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
@@ -1516,6 +1515,14 @@ namespace AX.SAPB1.Api.Services
             }
 
             return invoices.Values.ToList();
+        }
+
+        /// <summary>Valorizza i segnaposto di <see cref="InvoiceQueries.SinceFilter"/>; senza watermark non ce ne sono.</summary>
+        private static void AddSinceParameters(OdbcCommand command, DateTime? since)
+        {
+            if (!since.HasValue) return;
+            for (var i = 0; i < InvoiceQueries.SinceParameterCount; i++)
+                command.Parameters.AddWithValue($"@Since{i}", since.Value);
         }
 
         public async Task<IEnumerable<ErpLedgerEntryDto>> GetLedgerAsync(string? customerCode, DateTime? since)

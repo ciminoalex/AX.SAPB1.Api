@@ -25,6 +25,37 @@ namespace AX.SAPB1.Api.Services
 
         private const string NullText = "CAST(NULL AS NVARCHAR(254))";
 
+        /// <summary>Segnaposto <c>?</c> di <see cref="SinceFilter"/>: tutti da valorizzare con il watermark.</summary>
+        public const int SinceParameterCount = 2;
+
+        /// <summary>
+        /// Filtro del sync incrementale su una testata A/R: documenti modificati dal watermark OPPURE toccati da una
+        /// riconciliazione registrata dal watermark.
+        ///
+        /// <para><b>Perché non basta <c>UpdateDate</c>.</b> Un incasso, una nota di credito abbinata o l'annullo di un
+        /// incasso cambiano <c>PaidToDate</c> e <c>DocStatus</c> della fattura senza avanzarne <c>UpdateDate</c>.
+        /// Misurato su SBO_MTF: l'incasso registrato il 26/10/2026 ha chiuso tre fatture di un cliente rimaste al
+        /// 22/07 e al 04/09, e il portale le ha tenute scadute. Ognuno di quei movimenti crea però una riconciliazione
+        /// interna OITR/ITR1 (tipo 3 incasso, 4 nota di credito, 7 annullo), con una riga per ogni documento toccato
+        /// (<c>SrcObjTyp</c> + <c>SrcObjAbs</c> = <c>DocEntry</c>). Conta <c>CreateDate</c>, non <c>ReconDate</c>:
+        /// quella è la data valuta e può precedere di giorni la registrazione.</para>
+        /// </summary>
+        /// <param name="alias">Alias della testata nella query.</param>
+        /// <param name="headerTable"><c>OINV</c> oppure <c>ORIN</c>: decide il tipo oggetto cercato in ITR1.</param>
+        public static string SinceFilter(string schema, string headerTable, string alias) => $@"({alias}.""UpdateDate"" >= ?
+                    OR {alias}.""DocEntry"" IN (
+                        SELECT RL.""SrcObjAbs""
+                        FROM ""{schema}"".""ITR1"" RL
+                        INNER JOIN ""{schema}"".""OITR"" RH ON RH.""ReconNum"" = RL.""ReconNum""
+                        WHERE RH.""CreateDate"" >= ? AND RL.""SrcObjTyp"" = '{ObjectType(headerTable)}'))";
+
+        private static int ObjectType(string headerTable) => headerTable switch
+        {
+            "OINV" => 13,
+            "ORIN" => 14,
+            _ => throw new ArgumentException($"Testata A/R non prevista dal feed fatture: {headerTable}", nameof(headerTable)),
+        };
+
         /// <summary>
         /// Testate. Le colonne 10 e 11 sono sempre <c>U_AX360_InvId</c> e <c>U_AX360_DocType</c> (o NULL) per
         /// le fatture; le note di credito non le selezionano (non nascono mai dal portale).
@@ -38,7 +69,7 @@ namespace AX.SAPB1.Api.Services
                 var docType = fields.HeaderDocType ? $@"T.""{Ax360Udf.Col(Ax360Udf.DocType)}""" : NullText;
                 udfSelect = $", {invId}, {docType}";
             }
-            var sinceClause = hasSince ? @"WHERE T.""UpdateDate"" >= ?" : string.Empty;
+            var sinceClause = hasSince ? $"WHERE {SinceFilter(schema, headerTable, "T")}" : string.Empty;
 
             return $@"
                 SELECT
@@ -74,7 +105,7 @@ namespace AX.SAPB1.Api.Services
                 INNER JOIN ""{schema}"".""{headerTable}"" H ON H.""DocEntry"" = L.""DocEntry""
                 LEFT JOIN ""{schema}"".""OITM"" ITM ON ITM.""ItemCode"" = L.""ItemCode""
                 LEFT JOIN ""{schema}"".""OACT"" ACT ON ACT.""AcctCode"" = L.""AcctCode""
-                {(hasSince ? @"WHERE H.""UpdateDate"" >= ?" : string.Empty)}
+                {(hasSince ? $"WHERE {SinceFilter(schema, headerTable, "H")}" : string.Empty)}
                 ORDER BY L.""DocEntry"", L.""LineNum""";
         }
     }
