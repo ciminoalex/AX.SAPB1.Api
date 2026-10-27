@@ -45,7 +45,46 @@ namespace AX.SAPB1.Api.Tests
             var header = InvoiceQueries.BuildHeaderQuery("SBO_MTF", "ORIN", isCreditNote: true, hasSince: true, InvoiceQueries.Ax360Fields.All);
 
             Assert.DoesNotContain("U_AX360", header);
-            Assert.Contains(@"WHERE T.""UpdateDate"" >= ?", header);
+            Assert.Contains(@"WHERE (T.""UpdateDate"" >= ?", header);
+            // Le note di credito si cercano in ITR1 con il loro tipo oggetto, 14.
+            Assert.Contains(@"RL.""SrcObjTyp"" = '14'", header);
+        }
+
+        [Fact]
+        public void ConWatermark_EntranoAncheIDocumentiRiconciliati()
+        {
+            // Un incasso non avanza UpdateDate della fattura che salda: la fattura rientra nel delta solo
+            // perché una riconciliazione registrata dopo il watermark la nomina.
+            var header = InvoiceQueries.BuildHeaderQuery("SBO_MTF", "OINV", isCreditNote: false, hasSince: true, InvoiceQueries.Ax360Fields.All);
+            var lines = InvoiceQueries.BuildLineQuery("SBO_MTF", "OINV", "INV1", hasSince: true, InvoiceQueries.Ax360Fields.All);
+
+            Assert.Contains(@"T.""DocEntry"" IN (", header);
+            Assert.Contains(@"H.""DocEntry"" IN (", lines);
+            foreach (var query in new[] { header, lines })
+            {
+                Assert.Contains(@"""SBO_MTF"".""ITR1"" RL", query);
+                Assert.Contains(@"""SBO_MTF"".""OITR"" RH", query);
+                // La data di registrazione, non la data valuta (ReconDate), che può precederla di giorni.
+                Assert.Contains(@"RH.""CreateDate"" >= ?", query);
+                Assert.DoesNotContain("ReconDate", query);
+                Assert.Contains(@"RL.""SrcObjTyp"" = '13'", query);
+                Assert.Equal(InvoiceQueries.SinceParameterCount, CountOccurrences(query, "?"));
+            }
+        }
+
+        [Fact]
+        public void SenzaWatermark_NessunFiltro()
+        {
+            var lines = InvoiceQueries.BuildLineQuery("SBO_MTF", "OINV", "INV1", hasSince: false, InvoiceQueries.Ax360Fields.All);
+
+            Assert.DoesNotContain("ITR1", lines);
+            Assert.DoesNotContain("?", lines);
+        }
+
+        [Fact]
+        public void TestataSconosciuta_SiRifiuta()
+        {
+            Assert.Throws<ArgumentException>(() => InvoiceQueries.SinceFilter("SBO_MTF", "OPCH", "H"));
         }
 
         [Fact]
