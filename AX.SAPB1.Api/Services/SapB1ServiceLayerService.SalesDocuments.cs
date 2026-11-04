@@ -62,13 +62,35 @@ namespace AX.SAPB1.Api.Services
             return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
         }
 
-        /// <summary>PATCH <c>Attachments2(absoluteEntry)</c>: aggiorna la voce allegati (per esempio i flag delle righe).</summary>
-        public async Task<ServiceLayerResponse> PatchAttachmentsAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload)
+        /// <summary>GET <c>Attachments2(absoluteEntry)</c>: righe della voce allegati.</summary>
+        public async Task<ServiceLayerResponse> GetAttachmentsAsync(int absoluteEntry)
+        {
+            await GetSessionIdAsync();
+            var response = await ExecuteWithRetryAsync(() => _httpClient.GetAsync($"Attachments2({absoluteEntry})"));
+            var body = await response.Content.ReadAsStringAsync();
+            return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
+        }
+
+        /// <summary>
+        /// PATCH <c>Attachments2(absoluteEntry)</c> con <c>B1S-ReplaceCollectionsOnPatch: true</c>: le righe inviate
+        /// sostituiscono quelle esistenti. Le righe di Attachments2 non hanno chiave (niente <c>LineNum</c> nel
+        /// <c>$metadata</c>): senza l'header una riga inviata viene AGGIUNTA, e SAP risponde «file già esistente».
+        /// Provato in produzione il 4/11/2026 sulle 21 bozze d'ordine di ottobre.
+        /// </summary>
+        public async Task<ServiceLayerResponse> ReplaceAttachmentLinesAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload)
         {
             await GetSessionIdAsync();
             var json = JsonConvert.SerializeObject(payload, IgnoreNulls);
+            // Richiesta e contenuto dentro la lambda: ExecuteWithRetryAsync la riesegue sul 401.
             var response = await ExecuteWithRetryAsync(() =>
-                _httpClient.PatchAsync($"Attachments2({absoluteEntry})", new StringContent(json, Encoding.UTF8, "application/json")));
+            {
+                var request = new HttpRequestMessage(HttpMethod.Patch, $"Attachments2({absoluteEntry})")
+                {
+                    Content = new StringContent(json, Encoding.UTF8, "application/json"),
+                };
+                request.Headers.TryAddWithoutValidation("B1S-ReplaceCollectionsOnPatch", "true");
+                return _httpClient.SendAsync(request);
+            });
             var body = await response.Content.ReadAsStringAsync();
             return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
         }

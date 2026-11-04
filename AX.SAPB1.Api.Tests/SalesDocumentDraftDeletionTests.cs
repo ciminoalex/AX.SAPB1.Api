@@ -66,26 +66,40 @@ public class SalesDocumentDraftDeletionTests
             SalesDocumentPayloadBuilder.PlanDraftDeletion(new[] { Doc("ORDR", "order", "posted", 901, canceled: "Y") }).Decision);
     }
 
-    [Fact]
-    public void Il_flag_di_copia_si_accende_su_ogni_riga_dell_allegato()
-    {
-        var patch = SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(new[] { 2, 1, 2 });
-        var json = JObject.FromObject(patch);
+    // Risposta reale di GET Attachments2(7476) in produzione, 4/11/2026 (le righe non hanno LineNum).
+    private const string AttachmentEntryJson = @"{""AbsoluteEntry"":7476,""Attachments2_Lines"":[
+        {""SourcePath"":""/tmp/sap_b1_b1service0/ServiceLayer/Attachments2/"",""FileName"":""Area Edile S.r.l - Attivita ottobre 2026_12f1e47d"",""FileExtension"":""pdf"",""AttachmentDate"":""2026-11-04"",""Override"":""tNO"",""FreeText"":null,""CopyToTargetDoc"":""tNO"",""U_CorCategory"":null},
+        {""SourcePath"":""/tmp/sap_b1_b1service0/ServiceLayer/Attachments2/"",""FileName"":""Secondo"",""FileExtension"":""pdf"",""Override"":""tNO"",""FreeText"":""nota"",""CopyToTargetDoc"":""tNO""}]}";
 
-        var lines = (JArray)json["Attachments2_Lines"]!;
+    [Fact]
+    public void Il_flag_di_copia_rimanda_ogni_riga_completa_nello_stesso_ordine()
+    {
+        var patch = SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(JObject.Parse(AttachmentEntryJson));
+        var lines = (JArray)JObject.FromObject(patch!)["Attachments2_Lines"]!;
+
         Assert.Equal(2, lines.Count);
-        Assert.Equal(1, (int)lines[0]["LineNum"]!);
-        Assert.All(lines, l => Assert.Equal("tYES", (string?)l["CopyToTargetDoc"]));
+        Assert.Equal("Area Edile S.r.l - Attivita ottobre 2026_12f1e47d", (string?)lines[0]["FileName"]);
+        Assert.Equal("/tmp/sap_b1_b1service0/ServiceLayer/Attachments2/", (string?)lines[0]["SourcePath"]);
+        Assert.Equal("pdf", (string?)lines[0]["FileExtension"]);
+        Assert.Equal("Secondo", (string?)lines[1]["FileName"]);
+        Assert.Equal("nota", (string?)lines[1]["FreeText"]);
+        Assert.All(lines, l =>
+        {
+            Assert.Equal("tYES", (string?)l["CopyToTargetDoc"]);
+            // Nel sostituire la riga SAP ricopia il file sulla destinazione, che esiste già.
+            Assert.Equal("tYES", (string?)l["Override"]);
+            // La chiave che il Service Layer rifiuta («Property 'LineNum' of 'Attachments2_Line' is invalid»).
+            Assert.Null(l["LineNum"]);
+        });
     }
 
     [Fact]
-    public void Le_righe_dell_allegato_vengono_dalla_risposta_dell_upload_o_partono_da_uno()
+    public void Niente_patch_se_il_flag_e_gia_acceso_o_non_ci_sono_righe()
     {
-        var body = JObject.Parse(@"{""AbsoluteEntry"":7451,""Attachments2_Lines"":[{""LineNum"":1},{""LineNum"":2}]}");
-
-        Assert.Equal(new[] { 1, 2 }, SalesDocumentPayloadBuilder.AttachmentLineNums(body, 1));
-        Assert.Equal(new[] { 1 }, SalesDocumentPayloadBuilder.AttachmentLineNums(JObject.Parse(@"{""AbsoluteEntry"":7451}"), 1));
-        Assert.Equal(new[] { 1, 2 }, SalesDocumentPayloadBuilder.AttachmentLineNums(null, 2));
+        var gia = JObject.Parse(AttachmentEntryJson.Replace(@"""CopyToTargetDoc"":""tNO""", @"""CopyToTargetDoc"":""tYES"""));
+        Assert.Null(SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(gia));
+        Assert.Null(SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(JObject.Parse(@"{""AbsoluteEntry"":7451}")));
+        Assert.Null(SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(null));
     }
 
     // ── Servizio ──
@@ -97,6 +111,8 @@ public class SalesDocumentDraftDeletionTests
         public List<(int Entry, IReadOnlyDictionary<string, object?> Payload)> Patches { get; } = new();
         public bool RefuseDelete { get; set; }
         public bool RefusePatch { get; set; }
+        public bool RefuseGetAttachments { get; set; }
+        public string AttachmentEntry { get; set; } = AttachmentEntryJson;
 
         private IDbOdbcService Db() => InterfaceFake<IDbOdbcService>.Create(new()
         {
@@ -118,7 +134,10 @@ public class SalesDocumentDraftDeletionTests
             },
             ["UploadAttachmentsAsync"] = _ => Task.FromResult(new ServiceLayerResponse(201, true,
                 @"{""AbsoluteEntry"":7500,""Attachments2_Lines"":[{""LineNum"":1}]}")),
-            ["PatchAttachmentsAsync"] = a =>
+            ["GetAttachmentsAsync"] = _ => Task.FromResult(RefuseGetAttachments
+                ? new ServiceLayerResponse(404, false, @"{""error"":{""code"":-2028,""message"":{""value"":""No matching records found""}}}")
+                : new ServiceLayerResponse(200, true, AttachmentEntry)),
+            ["ReplaceAttachmentLinesAsync"] = a =>
             {
                 Patches.Add(((int)a[0]!, (IReadOnlyDictionary<string, object?>)a[1]!));
                 return Task.FromResult(RefusePatch
@@ -217,8 +236,10 @@ public class SalesDocumentDraftDeletionTests
         Assert.Equal(7500, outcome.Result.AttachmentEntry);
         var (entry, payload) = Assert.Single(sap.Patches);
         Assert.Equal(7500, entry);
-        var line = Assert.Single((JArray)JObject.FromObject(payload)["Attachments2_Lines"]!);
-        Assert.Equal("tYES", (string?)line["CopyToTargetDoc"]);
+        var lines = (JArray)JObject.FromObject(payload)["Attachments2_Lines"]!;
+        Assert.Equal(2, lines.Count);
+        Assert.All(lines, l => Assert.Equal("tYES", (string?)l["CopyToTargetDoc"]));
+        Assert.Equal("Area Edile S.r.l - Attivita ottobre 2026_12f1e47d", (string?)lines[0]["FileName"]);
         Assert.Empty(outcome.Result.Warnings);
     }
 
@@ -233,5 +254,30 @@ public class SalesDocumentDraftDeletionTests
         Assert.Equal(7500, outcome.Result.AttachmentEntry);
         Assert.Null(outcome.Result.AttachmentError);
         Assert.Contains(outcome.Result.Warnings, w => w.Contains("Copia nei documenti di destinazione"));
+    }
+
+    [Fact]
+    public async Task Se_la_voce_allegati_non_si_rilegge_niente_patch_e_un_avviso()
+    {
+        var sap = new Sap { RefuseGetAttachments = true };
+
+        var outcome = await sap.Service(attachments: true).CreateAsync(RequestWithAttachment());
+
+        Assert.Equal(201, outcome.StatusCode);
+        Assert.Equal(7500, outcome.Result.AttachmentEntry);
+        Assert.Empty(sap.Patches);
+        Assert.Contains(outcome.Result.Warnings, w => w.Contains("Copia nei documenti di destinazione"));
+    }
+
+    [Fact]
+    public async Task Con_il_flag_gia_acceso_non_si_riscrive_la_voce()
+    {
+        var sap = new Sap { AttachmentEntry = AttachmentEntryJson.Replace(@"""CopyToTargetDoc"":""tNO""", @"""CopyToTargetDoc"":""tYES""") };
+
+        var outcome = await sap.Service(attachments: true).CreateAsync(RequestWithAttachment());
+
+        Assert.Equal(201, outcome.StatusCode);
+        Assert.Empty(sap.Patches);
+        Assert.Empty(outcome.Result.Warnings);
     }
 }

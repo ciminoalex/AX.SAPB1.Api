@@ -58,8 +58,14 @@ namespace AX.SAPB1.Api.Services
         /// <summary>Upload multipart in <c>Attachments2</c>; la risposta porta <c>AbsoluteEntry</c>.</summary>
         Task<SalesDocuments.ServiceLayerResponse> UploadAttachmentsAsync(IReadOnlyList<SalesDocuments.ServiceLayerFile> files);
 
-        /// <summary>PATCH di una voce <c>Attachments2</c> (es. «Copia nei documenti di destinazione» sulle righe).</summary>
-        Task<SalesDocuments.ServiceLayerResponse> PatchAttachmentsAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload);
+        /// <summary>GET di una voce <c>Attachments2</c>: le righe con percorso d'origine, nome, estensione e flag.</summary>
+        Task<SalesDocuments.ServiceLayerResponse> GetAttachmentsAsync(int absoluteEntry);
+
+        /// <summary>
+        /// PATCH di una voce <c>Attachments2</c> che SOSTITUISCE le righe (header <c>B1S-ReplaceCollectionsOnPatch</c>):
+        /// le righe non hanno chiave, e senza l'header il Service Layer le aggiungerebbe invece di aggiornarle.
+        /// </summary>
+        Task<SalesDocuments.ServiceLayerResponse> ReplaceAttachmentLinesAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload);
 
         /// <summary>DELETE <c>Drafts(docEntry)</c>: elimina una bozza. Mai un definitivo: lo decide il chiamante.</summary>
         Task<SalesDocuments.ServiceLayerResponse> DeleteDraftAsync(int docEntry);
