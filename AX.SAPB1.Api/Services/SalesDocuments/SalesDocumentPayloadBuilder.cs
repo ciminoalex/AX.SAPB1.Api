@@ -463,30 +463,33 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// (<c>ATC1.CopyToTrgt</c>) su ogni riga: quando l'amministrazione trasforma l'ordine in fattura, il riepilogo
         /// interventi passa alla fattura e da lì al cliente. Richiesta di Martina Monopoli del 4/11/2026: le 23 righe
         /// create dal portale il 2/11 avevano il flag spento.
+        /// <para>Le righe di <c>Attachments2</c> non hanno chiave: il PATCH le sostituisce tutte
+        /// (<c>B1S-ReplaceCollectionsOnPatch</c>), quindi ogni riga si rimanda COMPLETA, nello stesso ordine, con i
+        /// valori letti da SAP (<paramref name="attachmentEntry"/> è la risposta di <c>GET Attachments2(n)</c>).
+        /// <c>Override = tYES</c> perché nel sostituire la riga SAP ricopia il file dal percorso d'origine (la copia
+        /// temporanea dello stesso upload) a quello di destinazione, che esiste già: senza, risponde «file già esistente».
+        /// Restituisce null se non c'è niente da fare: nessuna riga, oppure flag già acceso su tutte.</para>
         /// </summary>
-        public static Dictionary<string, object?> BuildCopyToTargetPatch(IEnumerable<int> lineNums)
-            => new()
+        public static Dictionary<string, object?>? BuildCopyToTargetPatch(JObject? attachmentEntry)
+        {
+            var lines = (attachmentEntry?["Attachments2_Lines"] as JArray)?.OfType<JObject>().ToList();
+            if (lines is not { Count: > 0 }) return null;
+            if (lines.All(l => string.Equals((string?)l["CopyToTargetDoc"], "tYES", StringComparison.OrdinalIgnoreCase)))
+                return null;
+            return new()
             {
-                ["Attachments2_Lines"] = lineNums
-                    .Distinct()
-                    .OrderBy(n => n)
-                    .Select(n => (object?)new Dictionary<string, object?> { ["LineNum"] = n, ["CopyToTargetDoc"] = "tYES" })
+                ["Attachments2_Lines"] = lines
+                    .Select(l => (object?)new Dictionary<string, object?>
+                    {
+                        ["SourcePath"] = (string?)l["SourcePath"],
+                        ["FileName"] = (string?)l["FileName"],
+                        ["FileExtension"] = (string?)l["FileExtension"],
+                        ["FreeText"] = (string?)l["FreeText"],
+                        ["Override"] = "tYES",
+                        ["CopyToTargetDoc"] = "tYES",
+                    })
                     .ToList(),
             };
-
-        /// <summary>
-        /// Numeri di riga della voce <c>Attachments2</c> appena caricata, letti dalla risposta dell'upload; se la
-        /// risposta non li riporta, 1..<paramref name="fileCount"/> (in ATC1 le righe partono da 1).
-        /// </summary>
-        public static IReadOnlyList<int> AttachmentLineNums(JObject? uploadBody, int fileCount)
-        {
-            var lines = (uploadBody?["Attachments2_Lines"] as JArray)?
-                .Select(l => ReadInt(l?["LineNum"]))
-                .Where(n => n is > 0)
-                .Select(n => n!.Value)
-                .Distinct()
-                .ToList();
-            return lines is { Count: > 0 } ? lines : Enumerable.Range(1, Math.Max(fileCount, 1)).ToList();
         }
 
         private static string ToSafeAscii(string value)

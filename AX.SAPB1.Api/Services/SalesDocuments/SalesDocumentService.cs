@@ -448,7 +448,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 if (reusable != null)
                 {
                     _logger.LogInformation("Allegati per {CorrelationId} già caricati da un tentativo precedente: riuso di Attachments2({Entry}).", correlationId, reusable);
-                    return (reusable, null, await EnableCopyToTargetAsync(reusable.Value, SalesDocumentPayloadBuilder.AttachmentLineNums(null, files.Count), correlationId));
+                    return (reusable, null, await EnableCopyToTargetAsync(reusable.Value, correlationId));
                 }
             }
             catch (Exception ex)
@@ -468,7 +468,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 var entry = SalesDocumentPayloadBuilder.ReadInt(body?["AbsoluteEntry"]);
                 if (entry == null)
                     return (null, "Allegato caricato ma SAP non ha restituito AbsoluteEntry: documento creato senza allegato.", null);
-                return (entry, null, await EnableCopyToTargetAsync(entry.Value, SalesDocumentPayloadBuilder.AttachmentLineNums(body, files.Count), correlationId));
+                return (entry, null, await EnableCopyToTargetAsync(entry.Value, correlationId));
             }
             catch (Exception ex)
             {
@@ -480,12 +480,22 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// <summary>
         /// Accende «Copia nei documenti di destinazione» sulle righe della voce allegati, così il riepilogo passa
         /// dall'ordine alla fattura. Mai fatale: l'allegato resta sul documento, e un fallimento torna come avviso.
+        /// Si rilegge la voce e si rimandano le righe complete (vedi <see cref="SalesDocumentPayloadBuilder.BuildCopyToTargetPatch"/>).
         /// </summary>
-        private async Task<string?> EnableCopyToTargetAsync(int absoluteEntry, IReadOnlyList<int> lineNums, string correlationId)
+        private async Task<string?> EnableCopyToTargetAsync(int absoluteEntry, string correlationId)
         {
             try
             {
-                var response = await _sl.PatchAttachmentsAsync(absoluteEntry, SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(lineNums));
+                var current = await _sl.GetAttachmentsAsync(absoluteEntry);
+                if (!current.IsSuccess)
+                {
+                    _logger.LogWarning("Rilettura di Attachments2({Entry}) per {CorrelationId} rifiutata ({StatusCode}): {Body}",
+                        absoluteEntry, correlationId, current.StatusCode, current.Body);
+                    return $"Allegato registrato, ma «Copia nei documenti di destinazione» non è stato acceso ({current.StatusCode}): {ServiceLayerErrors.ExtractMessage(current.Body)}";
+                }
+                var patch = SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(SalesDocumentPayloadBuilder.ParseBody(current.Body));
+                if (patch == null) return null;
+                var response = await _sl.ReplaceAttachmentLinesAsync(absoluteEntry, patch);
                 if (response.IsSuccess) return null;
                 _logger.LogWarning("Flag di copia sugli allegati Attachments2({Entry}) per {CorrelationId} rifiutato ({StatusCode}): {Body}",
                     absoluteEntry, correlationId, response.StatusCode, response.Body);
