@@ -9,6 +9,14 @@ namespace AX.SAPB1.Api.Models
         public string? TaxCode { get; set; }
         public string? Address { get; set; }
         public string? Email { get; set; }
+
+        /// <summary>
+        /// Anagrafica attiva oggi, con la stessa regola degli articoli (<c>DbOdbcService.IsItemActive</c>
+        /// su validFor/frozenFor e le loro date). Il portale la legge come stato ERP-neutro: una scheda
+        /// non attiva (tipicamente il vecchio codice di un cliente che ne ha uno nuovo) non deve più
+        /// ricevere task né regole mail.
+        /// </summary>
+        public bool Active { get; set; } = true;
     }
 
     public class ContactSummary
