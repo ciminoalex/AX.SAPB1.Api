@@ -58,6 +58,12 @@ namespace AX.SAPB1.Api.Services
         /// <summary>Upload multipart in <c>Attachments2</c>; la risposta porta <c>AbsoluteEntry</c>.</summary>
         Task<SalesDocuments.ServiceLayerResponse> UploadAttachmentsAsync(IReadOnlyList<SalesDocuments.ServiceLayerFile> files);
 
+        /// <summary>PATCH di una voce <c>Attachments2</c> (es. «Copia nei documenti di destinazione» sulle righe).</summary>
+        Task<SalesDocuments.ServiceLayerResponse> PatchAttachmentsAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload);
+
+        /// <summary>DELETE <c>Drafts(docEntry)</c>: elimina una bozza. Mai un definitivo: lo decide il chiamante.</summary>
+        Task<SalesDocuments.ServiceLayerResponse> DeleteDraftAsync(int docEntry);
+
         /// <summary>POST <c>Projects</c> (progetto contabile OPRJ).</summary>
         Task<SalesDocuments.ServiceLayerResponse> CreateFinancialProjectAsync(IReadOnlyDictionary<string, object?> payload);
     }

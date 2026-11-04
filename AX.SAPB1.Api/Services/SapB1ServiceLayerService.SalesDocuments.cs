@@ -62,6 +62,26 @@ namespace AX.SAPB1.Api.Services
             return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
         }
 
+        /// <summary>PATCH <c>Attachments2(absoluteEntry)</c>: aggiorna la voce allegati (per esempio i flag delle righe).</summary>
+        public async Task<ServiceLayerResponse> PatchAttachmentsAsync(int absoluteEntry, IReadOnlyDictionary<string, object?> payload)
+        {
+            await GetSessionIdAsync();
+            var json = JsonConvert.SerializeObject(payload, IgnoreNulls);
+            var response = await ExecuteWithRetryAsync(() =>
+                _httpClient.PatchAsync($"Attachments2({absoluteEntry})", new StringContent(json, Encoding.UTF8, "application/json")));
+            var body = await response.Content.ReadAsStringAsync();
+            return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
+        }
+
+        /// <summary>DELETE <c>Drafts(docEntry)</c>: elimina una bozza (che sia una bozza viva lo verifica il chiamante).</summary>
+        public async Task<ServiceLayerResponse> DeleteDraftAsync(int docEntry)
+        {
+            await GetSessionIdAsync();
+            var response = await ExecuteWithRetryAsync(() => _httpClient.DeleteAsync($"Drafts({docEntry})"));
+            var body = await response.Content.ReadAsStringAsync();
+            return new ServiceLayerResponse((int)response.StatusCode, response.IsSuccessStatusCode, body);
+        }
+
         /// <summary>POST <c>Projects</c>: crea un progetto contabile (OPRJ).</summary>
         public Task<ServiceLayerResponse> CreateFinancialProjectAsync(IReadOnlyDictionary<string, object?> payload)
             => PostJsonAsync("Projects", payload);

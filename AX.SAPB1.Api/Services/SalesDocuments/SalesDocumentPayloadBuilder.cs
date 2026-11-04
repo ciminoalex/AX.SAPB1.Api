@@ -424,6 +424,71 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             };
         }
 
+        /// <summary>Cosa fare dei documenti di una correlazione quando il portale chiede di eliminarne la bozza.</summary>
+        public enum DraftDeletionDecision { NothingToDelete, Delete, Refuse }
+
+        public sealed record DraftDeletionPlan(DraftDeletionDecision Decision, IReadOnlyList<int> DraftEntries, string? Reason);
+
+        /// <summary>
+        /// Bozze da eliminare per una correlazione. Si eliminano solo le bozze VIVE (non trasformate nel
+        /// definitivo); se la correlazione ha già un documento definitivo valido, o una bozza trasformata (che vuol
+        /// dire un definitivo nato da lei), non si elimina niente: quel documento si annulla in SAP, non si cancella,
+        /// e il portale non deve liberare le ore. Nessuna bozza viva = niente da fare (chiamata idempotente: la bozza
+        /// può essere stata eliminata a mano nel client SAP).
+        /// </summary>
+        public static DraftDeletionPlan PlanDraftDeletion(IEnumerable<ExistingSalesDocument> candidates)
+        {
+            var docs = candidates.ToList();
+            var posted = docs.FirstOrDefault(d =>
+                d.ConvertedDraft
+                || (d.Status == SalesDocumentKinds.Posted && string.Equals(d.Canceled, "N", StringComparison.OrdinalIgnoreCase)));
+            if (posted != null)
+                return new(DraftDeletionDecision.Refuse, Array.Empty<int>(), posted.ConvertedDraft
+                    ? "La bozza è già stata trasformata nel documento definitivo in SAP: non si elimina, il definitivo si annulla in SAP."
+                    : $"Il documento è registrato in SAP come definitivo (n. {posted.DocNum}): non è una bozza, si annulla in SAP.");
+
+            var drafts = docs
+                .Where(d => d.Status == SalesDocumentKinds.Draft && d.Table == "ODRF")
+                .Select(d => d.DocEntry)
+                .Distinct()
+                .OrderBy(e => e)
+                .ToList();
+            return drafts.Count == 0
+                ? new(DraftDeletionDecision.NothingToDelete, Array.Empty<int>(), null)
+                : new(DraftDeletionDecision.Delete, drafts, null);
+        }
+
+        /// <summary>
+        /// Corpo del PATCH su <c>Attachments2</c> che accende «Copia nei documenti di destinazione»
+        /// (<c>ATC1.CopyToTrgt</c>) su ogni riga: quando l'amministrazione trasforma l'ordine in fattura, il riepilogo
+        /// interventi passa alla fattura e da lì al cliente. Richiesta di Martina Monopoli del 4/11/2026: le 23 righe
+        /// create dal portale il 2/11 avevano il flag spento.
+        /// </summary>
+        public static Dictionary<string, object?> BuildCopyToTargetPatch(IEnumerable<int> lineNums)
+            => new()
+            {
+                ["Attachments2_Lines"] = lineNums
+                    .Distinct()
+                    .OrderBy(n => n)
+                    .Select(n => (object?)new Dictionary<string, object?> { ["LineNum"] = n, ["CopyToTargetDoc"] = "tYES" })
+                    .ToList(),
+            };
+
+        /// <summary>
+        /// Numeri di riga della voce <c>Attachments2</c> appena caricata, letti dalla risposta dell'upload; se la
+        /// risposta non li riporta, 1..<paramref name="fileCount"/> (in ATC1 le righe partono da 1).
+        /// </summary>
+        public static IReadOnlyList<int> AttachmentLineNums(JObject? uploadBody, int fileCount)
+        {
+            var lines = (uploadBody?["Attachments2_Lines"] as JArray)?
+                .Select(l => ReadInt(l?["LineNum"]))
+                .Where(n => n is > 0)
+                .Select(n => n!.Value)
+                .Distinct()
+                .ToList();
+            return lines is { Count: > 0 } ? lines : Enumerable.Range(1, Math.Max(fileCount, 1)).ToList();
+        }
+
         private static string ToSafeAscii(string value)
         {
             var normalized = value.Normalize(NormalizationForm.FormD);

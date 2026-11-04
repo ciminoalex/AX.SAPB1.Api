@@ -7,6 +7,9 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
     /// <summary>Esito HTTP di un push: codice di stato e corpo.</summary>
     public sealed record SalesDocumentOutcome(int StatusCode, SalesDocumentResult Result);
 
+    /// <summary>Esito HTTP dell'eliminazione delle bozze di una correlazione.</summary>
+    public sealed record SalesDocumentDraftDeletionOutcome(int StatusCode, SalesDocumentDraftDeletion Result);
+
     public interface ISalesDocumentService
     {
         /// <summary>Crea (o ritrova, se esiste già per lo stesso correlationId) il documento di vendita in SAP.</summary>
@@ -21,6 +24,13 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
         /// per la stessa correlazione; lancia se lo stato non è verificabile.
         /// </summary>
         Task<SalesDocumentState> GetStateAsync(string correlationId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Elimina in SAP le bozze vive della correlazione (vedi <see cref="SalesDocumentPayloadBuilder.PlanDraftDeletion"/>):
+        /// 200 eliminate o niente da eliminare, 409 se c'è già un definitivo, 502 se SAP rifiuta. Stesso lock della
+        /// creazione; lancia se lo stato non è verificabile (creazione con esito incerto).
+        /// </summary>
+        Task<SalesDocumentDraftDeletionOutcome> DeleteDraftAsync(string correlationId, CancellationToken cancellationToken = default);
     }
 
     /// <summary>
@@ -114,7 +124,8 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                     return new SalesDocumentOutcome(200, existing);
                 }
 
-                var (attachmentEntry, attachmentError) = await UploadAttachmentsAsync(request, correlationId);
+                var (attachmentEntry, attachmentError, attachmentWarning) = await UploadAttachmentsAsync(request, correlationId);
+                if (attachmentWarning != null) prepared.Warnings.Add(attachmentWarning);
 
                 var payload = SalesDocumentPayloadBuilder.Build(request, target, prepared.Schema!, prepared.LineUoms, attachmentEntry);
                 ServiceLayerResponse response;
@@ -235,6 +246,61 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             }
         }
 
+        /// <summary>
+        /// <para><b>Perché esiste.</b> La revisione dell'amministrazione sugli ordini in bozza del portale (prima
+        /// tornata T&amp;M, 2-4/11/2026) finisce in correzioni: si annulla il documento nel portale e se ne genera uno
+        /// nuovo. Il portale annulla solo se in SAP la bozza non c'è più, e senza questo endpoint andava eliminata a
+        /// mano dal client SAP, una per una.</para>
+        /// <para>Stesso lock e stessa regola sull'esito incerto della lettura dello stato: non si elimina (né si
+        /// dichiara «niente da eliminare») mentre una creazione per la stessa correlazione è in volo.</para>
+        /// </summary>
+        public async Task<SalesDocumentDraftDeletionOutcome> DeleteDraftAsync(string correlationId, CancellationToken cancellationToken = default)
+        {
+            var key = correlationId.Trim();
+            using (await CorrelationLocks.AcquireAsync(key, cancellationToken))
+            {
+                var udfInvId = Ax360Udf.Col(Ax360Udf.InvId);
+                var tables = new List<string>();
+                foreach (var table in DbOdbcService.CorrelationLookupTables)
+                    if ((await _db.GetUserFieldColumnsAsync(table)).Contains(udfInvId)) tables.Add(table);
+                if (tables.Count == 0)
+                    throw new InvalidOperationException($"Il campo utente {udfInvId} non esiste su nessuna tabella dei documenti di vendita: stato non verificabile.");
+
+                var docs = await _db.FindSalesDocumentsByCorrelationIdAsync(key, tables);
+                if (docs.Count == 0 && UncertainCreations.Shared.IsUncertain(key, DateTime.UtcNow, out var since))
+                    throw new InvalidOperationException(
+                        $"La creazione del documento {key} delle {since:HH:mm:ss} UTC non ha avuto risposta dal Service Layer: stato non verificabile, riprovare più tardi.");
+
+                var plan = SalesDocumentPayloadBuilder.PlanDraftDeletion(docs);
+                var result = new SalesDocumentDraftDeletion { Found = docs.Count > 0 };
+                switch (plan.Decision)
+                {
+                    case SalesDocumentPayloadBuilder.DraftDeletionDecision.Refuse:
+                        result.ErrorMessage = plan.Reason;
+                        return new SalesDocumentDraftDeletionOutcome(409, result);
+                    case SalesDocumentPayloadBuilder.DraftDeletionDecision.NothingToDelete:
+                        return new SalesDocumentDraftDeletionOutcome(200, result);
+                }
+
+                foreach (var docEntry in plan.DraftEntries)
+                {
+                    var response = await _sl.DeleteDraftAsync(docEntry);
+                    if (!response.IsSuccess)
+                    {
+                        _logger.LogError("Eliminazione della bozza Drafts({DocEntry}) per {CorrelationId} rifiutata da SAP ({StatusCode}): {Body}",
+                            docEntry, key, response.StatusCode, response.Body);
+                        result.Deleted = result.DocEntries.Count > 0;
+                        result.ErrorMessage = $"SAP B1 non ha eliminato la bozza {docEntry} ({response.StatusCode}): {ServiceLayerErrors.ExtractMessage(response.Body)}";
+                        return new SalesDocumentDraftDeletionOutcome(502, result);
+                    }
+                    result.DocEntries.Add(docEntry);
+                    _logger.LogInformation("Bozza Drafts({DocEntry}) del documento {CorrelationId} eliminata su richiesta del portale.", docEntry, key);
+                }
+                result.Deleted = true;
+                return new SalesDocumentDraftDeletionOutcome(200, result);
+            }
+        }
+
         // ─────────────────────────────────────────────────────────────────────
 
         private sealed class Prepared
@@ -341,12 +407,15 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
             };
         }
 
-        /// <summary>Carica gli allegati; mai fatale per il documento. Restituisce (AbsoluteEntry, errore).</summary>
-        private async Task<(int? Entry, string? Error)> UploadAttachmentsAsync(SalesDocumentRequest request, string correlationId)
+        /// <summary>
+        /// Carica gli allegati; mai fatale per il documento. Restituisce (AbsoluteEntry, errore, avviso): l'avviso
+        /// dice che l'allegato c'è ma il flag «Copia nei documenti di destinazione» non si è acceso.
+        /// </summary>
+        private async Task<(int? Entry, string? Error, string? Warning)> UploadAttachmentsAsync(SalesDocumentRequest request, string correlationId)
         {
-            if (request.Attachments == null || request.Attachments.Count == 0) return (null, null);
+            if (request.Attachments == null || request.Attachments.Count == 0) return (null, null, null);
             if (!AttachmentsEnabled)
-                return (null, "Allegati disattivati da configurazione (SapB1:SalesDocuments:Attachments:Enabled=false).");
+                return (null, "Allegati disattivati da configurazione (SapB1:SalesDocuments:Attachments:Enabled=false).", null);
 
             var files = new List<ServiceLayerFile>();
             foreach (var a in request.Attachments)
@@ -358,10 +427,10 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 }
                 catch (FormatException)
                 {
-                    return (null, $"Allegato '{a?.FileName}': contenuto non in base64 valido.");
+                    return (null, $"Allegato '{a?.FileName}': contenuto non in base64 valido.", null);
                 }
                 if (bytes.Length == 0)
-                    return (null, $"Allegato '{a?.FileName}': contenuto vuoto.");
+                    return (null, $"Allegato '{a?.FileName}': contenuto vuoto.", null);
                 files.Add(new ServiceLayerFile(
                     SalesDocumentPayloadBuilder.SanitizeAttachmentFileName(a!.FileName, correlationId),
                     string.IsNullOrWhiteSpace(a.ContentType) ? "application/pdf" : a.ContentType.Trim(),
@@ -379,7 +448,7 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 if (reusable != null)
                 {
                     _logger.LogInformation("Allegati per {CorrelationId} già caricati da un tentativo precedente: riuso di Attachments2({Entry}).", correlationId, reusable);
-                    return (reusable, null);
+                    return (reusable, null, await EnableCopyToTargetAsync(reusable.Value, SalesDocumentPayloadBuilder.AttachmentLineNums(null, files.Count), correlationId));
                 }
             }
             catch (Exception ex)
@@ -393,17 +462,39 @@ namespace AX.SAPB1.Api.Services.SalesDocuments
                 if (!response.IsSuccess)
                 {
                     _logger.LogWarning("Upload allegati per {CorrelationId} rifiutato ({StatusCode}): {Body}", correlationId, response.StatusCode, response.Body);
-                    return (null, $"Allegato non caricato in SAP ({response.StatusCode}): {ServiceLayerErrors.ExtractMessage(response.Body)}");
+                    return (null, $"Allegato non caricato in SAP ({response.StatusCode}): {ServiceLayerErrors.ExtractMessage(response.Body)}", null);
                 }
-                var entry = SalesDocumentPayloadBuilder.ReadInt(SalesDocumentPayloadBuilder.ParseBody(response.Body)?["AbsoluteEntry"]);
-                return entry != null
-                    ? (entry, null)
-                    : (null, "Allegato caricato ma SAP non ha restituito AbsoluteEntry: documento creato senza allegato.");
+                var body = SalesDocumentPayloadBuilder.ParseBody(response.Body);
+                var entry = SalesDocumentPayloadBuilder.ReadInt(body?["AbsoluteEntry"]);
+                if (entry == null)
+                    return (null, "Allegato caricato ma SAP non ha restituito AbsoluteEntry: documento creato senza allegato.", null);
+                return (entry, null, await EnableCopyToTargetAsync(entry.Value, SalesDocumentPayloadBuilder.AttachmentLineNums(body, files.Count), correlationId));
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Upload allegati per {CorrelationId} fallito.", correlationId);
-                return (null, $"Allegato non caricato: {ex.Message}");
+                return (null, $"Allegato non caricato: {ex.Message}", null);
+            }
+        }
+
+        /// <summary>
+        /// Accende «Copia nei documenti di destinazione» sulle righe della voce allegati, così il riepilogo passa
+        /// dall'ordine alla fattura. Mai fatale: l'allegato resta sul documento, e un fallimento torna come avviso.
+        /// </summary>
+        private async Task<string?> EnableCopyToTargetAsync(int absoluteEntry, IReadOnlyList<int> lineNums, string correlationId)
+        {
+            try
+            {
+                var response = await _sl.PatchAttachmentsAsync(absoluteEntry, SalesDocumentPayloadBuilder.BuildCopyToTargetPatch(lineNums));
+                if (response.IsSuccess) return null;
+                _logger.LogWarning("Flag di copia sugli allegati Attachments2({Entry}) per {CorrelationId} rifiutato ({StatusCode}): {Body}",
+                    absoluteEntry, correlationId, response.StatusCode, response.Body);
+                return $"Allegato registrato, ma «Copia nei documenti di destinazione» non è stato acceso ({response.StatusCode}): {ServiceLayerErrors.ExtractMessage(response.Body)}";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Flag di copia sugli allegati Attachments2({Entry}) per {CorrelationId} non impostato.", absoluteEntry, correlationId);
+                return $"Allegato registrato, ma «Copia nei documenti di destinazione» non è stato acceso: {ex.Message}";
             }
         }
 
