@@ -178,6 +178,25 @@ namespace AX.SAPB1.Api.Models
         public bool Cancelled { get; set; }
     }
 
+    /// <summary>
+    /// Risposta di <c>DELETE /api/sales-documents/by-correlation/{correlationId}</c>: le bozze del documento del
+    /// portale eliminate in SAP. Il portale la chiama quando annulla un suo documento ancora in bozza nell'ERP, così
+    /// la revisione dell'amministrazione (bozza sbagliata → annullo → nuovo documento) non passa dal client SAP.
+    /// </summary>
+    public class SalesDocumentDraftDeletion
+    {
+        /// <summary>True se per la correlazione esiste (o esisteva fino a questa chiamata) un documento in SAP.</summary>
+        public bool Found { get; set; }
+
+        /// <summary>True se questa chiamata ha eliminato almeno una bozza.</summary>
+        public bool Deleted { get; set; }
+
+        /// <summary>DocEntry delle bozze eliminate.</summary>
+        public List<int> DocEntries { get; set; } = new();
+
+        public string? ErrorMessage { get; set; }
+    }
+
     // ── Progetto contabile (OPRJ) ──
 
     /// <summary>Richiesta di <c>POST /api/fiscal-projects</c>.</summary>

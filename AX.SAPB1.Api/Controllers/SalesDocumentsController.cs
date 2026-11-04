@@ -63,6 +63,30 @@ namespace AX.SAPB1.Api.Controllers
         }
 
         /// <summary>
+        /// Elimina in SAP le bozze del documento del portale (correlazione). 200 con <c>deleted</c> se ne ha
+        /// eliminate, 200 con <c>deleted = false</c> se non ce n'erano (idempotente: la bozza può essere già stata
+        /// eliminata a mano); 409 se la correlazione ha già un definitivo, che si annulla in SAP e non si cancella;
+        /// 502 se SAP rifiuta; 500 se lo stato non è verificabile. Su una company in sola lettura lo ferma il cancello
+        /// delle company (403), come ogni scrittura.
+        /// </summary>
+        [HttpDelete("by-correlation/{correlationId}")]
+        public async Task<ActionResult<SalesDocumentDraftDeletion>> DeleteDraft([FromRoute] string correlationId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(correlationId) || correlationId.Trim().Length > SalesDocumentPayloadBuilder.CorrelationIdMaxLength)
+                return BadRequest("correlationId non valido.");
+            try
+            {
+                var outcome = await _service.DeleteDraftAsync(correlationId, cancellationToken);
+                return StatusCode(outcome.StatusCode, outcome.Result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Errore nell'eliminazione della bozza del documento {CorrelationId}", correlationId);
+                return StatusCode(500, new SalesDocumentDraftDeletion { ErrorMessage = ex.Message });
+            }
+        }
+
+        /// <summary>
         /// Anteprima per il collaudo: esegue le stesse verifiche del POST (validazione, campi utente, documento
         /// esistente, unità di misura) e restituisce il payload che verrebbe inviato al Service Layer, senza
         /// scrivere nulla in SAP.
