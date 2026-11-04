@@ -837,6 +837,7 @@ namespace AX.SAPB1.Api.Services
         public async Task<IEnumerable<CustomerSummary>> GetCustomersAsync()
         {
             var customers = new List<CustomerSummary>();
+            var today = DateTime.Today;
             try
             {
                 using var connection = await CreateOpenConnectionAsync();
@@ -852,7 +853,9 @@ namespace AX.SAPB1.Api.Services
                         ""LicTradNum"",
                         ""AddID"",
                         ""Address"",
-                        ""E_Mail""
+                        ""E_Mail"",
+                        ""validFor"", ""validFrom"", ""validTo"",
+                        ""frozenFor"", ""frozenFrom"", ""frozenTo""
                     FROM ""{_schema}"".""OCRD""
                     WHERE ""CardType"" = 'C'
                     ORDER BY ""CardName""";
@@ -871,7 +874,17 @@ namespace AX.SAPB1.Api.Services
                         VatNumber = reader.IsDBNull(2) ? null : reader.GetString(2),
                         TaxCode = reader.IsDBNull(3) ? null : reader.GetString(3),
                         Address = reader.IsDBNull(4) ? null : reader.GetString(4),
-                        Email = reader.IsDBNull(5) ? null : reader.GetString(5)
+                        Email = reader.IsDBNull(5) ? null : reader.GetString(5),
+                        // Stessa regola degli articoli: in SAP B1 "inattivo" è frozenFor (con le date),
+                        // validFor è "attivo SOLO nell'intervallo".
+                        Active = IsItemActive(
+                            ParseErpText(reader.IsDBNull(6) ? null : reader.GetValue(6)),
+                            reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                            reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                            ParseErpText(reader.IsDBNull(9) ? null : reader.GetValue(9)),
+                            reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                            reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                            today)
                     });
                 }
             }
